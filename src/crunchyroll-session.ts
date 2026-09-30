@@ -109,21 +109,6 @@ export class SessionFile {
   }
 }
 
-/** Decode only an identity hint when migrating a database from manual token mode. */
-export function tokenProfileId(token: string | undefined): string | undefined {
-  try {
-    const claims: unknown = JSON.parse(
-      Buffer.from(token?.replace(/^Bearer\s+/i, "").split(".")[1] ?? "", "base64url").toString(
-        "utf8",
-      ),
-    );
-    const parsed = z.object({ profile_id: identifier }).safeParse(claims);
-    return parsed.success ? parsed.data.profile_id : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function assertIdentity(
   session: CrunchyrollSession,
   expected: Pick<CrunchyrollSession, "accountId" | "profileId">,

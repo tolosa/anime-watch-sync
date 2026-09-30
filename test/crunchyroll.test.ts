@@ -6,11 +6,11 @@ import { episode, mockFetch, rawEpisode } from "./helpers.ts";
 
 const config = {
   baseUrl: "https://www.crunchyroll.com",
-  accessToken: "secret",
   accountId: "account",
-  profileId: "profile",
   locale: "en-US",
 };
+
+const tokens = { async getAccessToken() { return "secret"; } };
 
 test("normalizes nested episode metadata and converts playhead seconds to duration milliseconds", () => {
   const item = normalizeEntry(rawEpisode(2, { fully_watched: false, playhead: 1296 }));
@@ -62,7 +62,7 @@ test("paginates from page 1, respects next_page over total, and never follows ex
       );
     }),
   );
-  const pages = await Array.fromAsync(new CrunchyrollClient(config, http).history());
+  const pages = await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history());
   assert.equal(pages.length, 2);
   assert.equal(urls[0]?.pathname, "/content/v2/account/watch-history");
   assert.equal(urls[0]?.searchParams.get("page_size"), "100");
@@ -76,12 +76,12 @@ test("uses total across short pages and ends on an empty history", async () => {
     "Crunchyroll",
     mockFetch(() => Response.json({ data: [rawEpisode(++calls)], total: 2 })),
   );
-  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, http).history())).length, 2);
+  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length, 2);
   const empty = new JsonHttpClient(
     "Crunchyroll",
     mockFetch(() => Response.json({ data: [], total: 0 })),
   );
-  assert.deepEqual(await Array.fromAsync(new CrunchyrollClient(config, empty).history()), []);
+  assert.deepEqual(await Array.fromAsync(new CrunchyrollClient(config, tokens, empty).history()), []);
 });
 
 test("follows relative cursor links and rejects missing or repeated cursors", async () => {
@@ -102,7 +102,7 @@ test("follows relative cursor links and rejects missing or repeated cursors", as
       );
     }),
   );
-  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, http).history())).length, 2);
+  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length, 2);
   assert.deepEqual(requested, ["1", "next-cursor"]);
 
   const missing = new JsonHttpClient(
@@ -115,7 +115,7 @@ test("follows relative cursor links and rejects missing or repeated cursors", as
     ),
   );
   await assert.rejects(
-    Array.fromAsync(new CrunchyrollClient(config, missing).history()),
+    Array.fromAsync(new CrunchyrollClient(config, tokens, missing).history()),
     /missing its page cursor/,
   );
 
@@ -128,7 +128,7 @@ test("follows relative cursor links and rejects missing or repeated cursors", as
     }),
   );
   await assert.rejects(
-    Array.fromAsync(new CrunchyrollClient(config, repeated).history()),
+    Array.fromAsync(new CrunchyrollClient(config, tokens, repeated).history()),
     /repeated a pagination cursor/,
   );
   assert.equal(requests, 1);
@@ -140,7 +140,7 @@ test("rejects malformed responses and repeated pages instead of silently importi
     mockFetch(() => Response.json({ error: "changed" })),
   );
   await assert.rejects(
-    Array.fromAsync(new CrunchyrollClient(config, malformed).history()),
+    Array.fromAsync(new CrunchyrollClient(config, tokens, malformed).history()),
     /unexpected shape/,
   );
   const repeated = new JsonHttpClient(
@@ -148,7 +148,7 @@ test("rejects malformed responses and repeated pages instead of silently importi
     mockFetch(() => Response.json({ data: [rawEpisode()], total: 100 })),
   );
   await assert.rejects(
-    Array.fromAsync(new CrunchyrollClient(config, repeated).history()),
+    Array.fromAsync(new CrunchyrollClient(config, tokens, repeated).history()),
     /repeated/,
   );
 });
@@ -249,51 +249,16 @@ test("does not label every Cloudflare-served 403 as a challenge", async () => {
   );
 });
 
-test("rejects an expired token before making a request, without exposing the token", async () => {
-  const accessToken = `header.${Buffer.from(JSON.stringify({ exp: 1, private: "secret" })).toString("base64url")}.signature`;
-  let calls = 0;
-  const http = new JsonHttpClient(
-    "Crunchyroll",
-    mockFetch(() => {
-      calls++;
-      return Response.json({ data: [] });
-    }),
-  );
-  const client = new CrunchyrollClient({ ...config, accessToken }, http);
-  await assert.rejects(
-    Array.fromAsync(client.history()),
-    (error: unknown) =>
-      error instanceof Error &&
-      error.message.includes("CR_ACCESS_TOKEN has expired") &&
-      !error.message.includes(accessToken),
-  );
-  assert.equal(calls, 0);
-});
 
-test("allows unexpired, opaque, and malformed tokens to be validated by the service", async () => {
-  const payloads = [
-    { exp: Math.floor(Date.now() / 1000) + 3600 },
-    {},
-    null,
-    { exp: "not-a-number" },
-  ];
-  const tokens = payloads.map(
-    (payload) => `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`,
-  );
-  tokens.push("opaque-token", "malformed.payload.signature");
+test("a missing session stops history requests before contacting Crunchyroll", async () => {
   let calls = 0;
-  const http = new JsonHttpClient(
-    "Crunchyroll",
-    mockFetch(() => {
-      calls++;
-      return Response.json({ data: [] });
-    }),
-  );
-  for (const accessToken of tokens) {
-    assert.deepEqual(
-      await Array.fromAsync(new CrunchyrollClient({ ...config, accessToken }, http).history()),
-      [],
-    );
-  }
-  assert.equal(calls, tokens.length);
+  const http = new JsonHttpClient("Crunchyroll", mockFetch(() => {
+    calls++;
+    return Response.json({ data: [] });
+  }));
+  const client = new CrunchyrollClient(config, {
+    async getAccessToken() { throw new Error("No Crunchyroll session saved. Run pnpm dev auth login."); },
+  }, http);
+  await assert.rejects(Array.fromAsync(client.history()), /auth login/);
+  assert.equal(calls, 0);
 });

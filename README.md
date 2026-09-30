@@ -38,7 +38,7 @@ The app opens **an installed Google Chrome** directly with a temporary, separate
 
 The app captures the web session's `etp_rt` credential, access token, account/profile IDs, and the client/device information needed for renewal. It verifies renewal through `impit`, then saves the session to **`./data/cr-session.json`**. The file is unencrypted local JSON with owner-only permissions (`0600`), and `data/` is ignored by Git. Passwords are entered only on Crunchyroll's sign-in page and are not retained by the app. The temporary browser profile is deleted when login finishes or is cancelled. Keychain is not used.
 
-`pull` and `sync --pull` use the saved session in preference to `CR_ACCESS_TOKEN` and `CR_ACCOUNT_ID` in `.env`. The account ID comes from the authenticated session. Before each page, the app checks the cached token's expiry and renews within 60 seconds of expiry using:
+`pull` and `sync --pull` authenticate exclusively through the saved session file. The access token and account/profile IDs come from that session. If no session is saved, run `pnpm dev auth login`. Before each page, the app checks the cached token's expiry and renews within 60 seconds of expiry using:
 
 ```text
 POST https://www.crunchyroll.com/auth/v1/token
@@ -46,7 +46,7 @@ Cookie: etp_rt=<saved credential>
 grant_type=etp_rt_cookie&scope=offline_access&device_id=<original device>
 ```
 
-The original web client authorization and any observed device type/name are preserved. Returned credentials are rotated in the session file with an atomic replacement. An API `401` triggers one renewal and one retry of that page. A `403` does not trigger a renewal loop. A revoked or expired renewable session requires another `auth login`; automatic renewal cannot keep a revoked session alive. An invalid saved file reports an error instead of silently falling back to `.env`.
+The original web client authorization and any observed device type/name are preserved. Returned credentials are rotated in the session file with an atomic replacement. An API `401` triggers one renewal and one retry of that page. A `403` does not trigger a renewal loop. A revoked or expired renewable session requires another `auth login`; automatic renewal cannot keep a revoked session alive. An invalid saved file reports an error and must be replaced through `auth login`.
 
 ```sh
 pnpm dev auth status   # Local identity and token expiry; no credentials printed.
@@ -54,9 +54,9 @@ pnpm dev pull          # Refreshes tokens automatically as needed.
 pnpm dev auth logout   # Removes the saved local session.
 ```
 
-`auth status` does not contact Crunchyroll and cannot tell whether the renewable credential has been revoked. `auth logout` deletes the local file; it does not revoke sessions on Crunchyroll's servers. If a manual access token remains in `.env`, remove it to stop the fallback from authenticating. Run one login/pull process at a time: session files deliberately use no file locking.
+`auth status` does not contact Crunchyroll and cannot tell whether the renewable credential has been revoked. `auth logout` deletes the local file; it does not revoke sessions on Crunchyroll's servers. After logout, `pull` and `sync --pull` require another `auth login`. Run one login/pull process at a time: session files deliberately use no file locking.
 
-`CR_PROFILE_ID` remains a local database label, defaulting to `default`. The authenticated profile ID is additionally bound to the database. When migrating existing history, the app checks the previous `.env` token's profile claim if available; choose the same profile you used to import that history. Changing profiles requires a separate database and session file:
+`CR_PROFILE_ID` remains a local database label, defaulting to `default`. The authenticated profile ID is additionally bound to the database. When attaching a session to older history that has only a local profile label, choose the same profile you originally used to import that history. Changing profiles requires a separate database and session file:
 
 ```sh
 pnpm dev --db ./data/other-profile.sqlite --session-file ./data/other-cr-session.json auth login
@@ -64,8 +64,6 @@ pnpm dev --db ./data/other-profile.sqlite --session-file ./data/other-cr-session
 ```
 
 `CR_SESSION_PATH` can set the default session-file path. Keep custom session files in an ignored directory. `CR_PROFILE_ID` does not switch remote profiles; select the intended profile during login.
-
-For manual-token operation without a saved session, `CR_ACCESS_TOKEN` and `CR_ACCOUNT_ID` are still supported. Copy them from a successful browser watch-history request; the account ID is the path segment after `/content/v2/`. A manual access token cannot renew itself. A readable JWT `exp` claim is checked locally before requests, as an expiry hint rather than signature verification.
 
 If your browser uses `https://beta-api.crunchyroll.com` for history, set `CR_BASE_URL` to that origin. History is restricted to that origin or `https://www.crunchyroll.com`, and redirects are rejected so bearer credentials cannot be forwarded elsewhere. Session renewal always uses `www.crunchyroll.com`.
 
@@ -203,8 +201,6 @@ The app imports only the history Crunchyroll currently exposes. It cannot recons
 | --- | --- |
 | `CR_BROWSER_PATH` | Optional installed browser executable for `auth login` |
 | `CR_SESSION_PATH` | `./data/cr-session.json`; local renewable session file |
-| `CR_ACCESS_TOKEN` | Optional manual fallback when no session file exists |
-| `CR_ACCOUNT_ID` | Required only for manual-token fallback |
 | `CR_PROFILE_ID` | `default`; local profile identity label |
 | `CR_BASE_URL` | `https://www.crunchyroll.com` |
 | `CR_LOCALE` | `en-US` |
@@ -219,7 +215,7 @@ Override the database per invocation with the global `--db` flag:
 pnpm dev --db ./data/other-profile.sqlite seasons
 ```
 
-The database contains `history`, `mappings`, `sync_log`, and `metadata` tables. SQLite uses WAL mode and a five-second busy timeout. Import transactions commit one page at a time. Credentials are read from the session file or your environment and never stored in SQLite. `.env`, the default session file, temporary login profiles, database files, and build output are ignored by Git. Database files are created with owner-only permissions.
+The database contains `history`, `mappings`, `sync_log`, and `metadata` tables. SQLite uses WAL mode and a five-second busy timeout. Import transactions commit one page at a time. Crunchyroll credentials are read only from the session file. AniList credentials are read from your environment or `.env`. Credentials are never stored in SQLite. `.env`, the default session file, temporary login profiles, database files, and build output are ignored by Git. Database files are created with owner-only permissions.
 
 ## Development and verification
 

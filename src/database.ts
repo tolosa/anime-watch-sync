@@ -66,21 +66,9 @@ export class Store implements Disposable {
     accountId: string,
     profileId: string,
     label: string,
-    legacyProfileId?: string,
   ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const source = this.db
-        .prepare("SELECT value FROM metadata WHERE key = ?")
-        .get("Crunchyroll source");
-      const authenticated = this.db
-        .prepare("SELECT value FROM metadata WHERE key = ?")
-        .get("Crunchyroll authenticated profile");
-      if (source && !authenticated && legacyProfileId && legacyProfileId !== profileId) {
-        throw new Error(
-          "The signed-in profile differs from the previous CR_ACCESS_TOKEN profile. Use a separate --db file for each profile.",
-        );
-      }
       this.bindSource(accountId, label);
       this.bind("Crunchyroll authenticated profile", profileId, true);
       this.db.exec("COMMIT");

@@ -5,7 +5,6 @@ import { Command, InvalidArgumentError, Option } from "commander";
 import { AniListClient, mediaTitle } from "./anilist.ts";
 import { browserLogin } from "./browser-login.ts";
 import {
-  crunchyrollConfig,
   crunchyrollSettings,
   loadEnvironment,
   requiredEnv,
@@ -17,7 +16,6 @@ import {
   renewSession,
   SessionFile,
   SessionManager,
-  tokenProfileId,
 } from "./crunchyroll-session.ts";
 import { Store } from "./database.ts";
 import { syncAniList } from "./sync.ts";
@@ -65,31 +63,11 @@ function aniList(): AniListClient {
 }
 
 async function pull(store: Store, pageSize = 100): Promise<void> {
-  const file = sessionFile();
-  const saved = await file.read();
-  if (!saved && !process.env.CR_ACCESS_TOKEN?.trim()) {
-    throw new Error(
-      "No Crunchyroll session saved. Run pnpm dev auth login, or set CR_ACCESS_TOKEN and CR_ACCOUNT_ID for manual authentication.",
-    );
-  }
-  const manager = saved ? new SessionManager(file) : undefined;
-  const session = await manager?.getSession();
-  const config = session
-    ? { ...crunchyrollSettings(), accessToken: session.accessToken, accountId: session.accountId }
-    : crunchyrollConfig();
-  if (session) {
-    store.bindAuthenticatedSource(
-      session.accountId,
-      session.profileId,
-      config.profileId,
-      tokenProfileId(process.env.CR_ACCESS_TOKEN),
-    );
-  } else {
-    store.bindSource(config.accountId, config.profileId);
-    const profileId = tokenProfileId(config.accessToken);
-    if (profileId) store.bindAuthenticatedSource(config.accountId, profileId, config.profileId);
-  }
-  const client = new CrunchyrollClient(config, undefined, manager);
+  const manager = new SessionManager(sessionFile());
+  const session = await manager.getSession();
+  const config = { ...crunchyrollSettings(), accountId: session.accountId };
+  store.bindAuthenticatedSource(session.accountId, session.profileId, config.profileId);
+  const client = new CrunchyrollClient(config, manager);
   let fetched = 0;
   let page = 0;
   for await (const items of client.history(pageSize)) {
@@ -132,7 +110,6 @@ auth
       session.accountId,
       session.profileId,
       crunchyrollSettings().profileId,
-      tokenProfileId(process.env.CR_ACCESS_TOKEN),
     );
     await file.save(session);
     console.log(
@@ -148,8 +125,6 @@ auth
     const session = await file.read();
     if (!session) {
       console.log("No saved Crunchyroll session. Run pnpm dev auth login.");
-      if (process.env.CR_ACCESS_TOKEN?.trim())
-        console.log("A manual .env access token is configured as a fallback.");
       return;
     }
     console.log(`Session file: ${clean(file.path)}`);
@@ -169,10 +144,6 @@ auth
   .action(async () => {
     await sessionFile().remove();
     console.log("Local Crunchyroll session removed.");
-    if (process.env.CR_ACCESS_TOKEN?.trim())
-      console.log(
-        "CR_ACCESS_TOKEN remains configured in .env/environment and can still be used by pull. Remove it to disable manual authentication.",
-      );
   });
 
 program

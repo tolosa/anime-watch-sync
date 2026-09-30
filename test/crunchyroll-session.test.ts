@@ -216,8 +216,6 @@ test("renewal and session replacement cannot change the account/profile mid-impo
 const config = {
   baseUrl: "https://www.crunchyroll.com",
   accountId: "account",
-  profileId: "profile",
-  accessToken: "old",
   locale: "en-US",
 };
 test("history retries the same page once on 401 and uses the renewed token", async () => {
@@ -228,11 +226,11 @@ test("history retries the same page once on 401 and uses the renewed token", asy
     tokens.push(new Headers(init?.headers).get("authorization")!);
     return tokens.length === 1 ? new Response(null, { status: 401 }) : Response.json({ data: [] });
   });
-  const client = new CrunchyrollClient(config, http, {
+  const client = new CrunchyrollClient(config, {
     async getAccessToken(rejected) {
       return rejected === "old" ? "renewed" : "old";
     },
-  });
+  }, http);
   for await (const _ of client.history()) assert.fail("empty history should not yield");
   assert.deepEqual(tokens, ["Bearer old", "Bearer renewed"]);
   assert.equal(urls[0], urls[1]);
@@ -246,12 +244,12 @@ test("history does not refresh on 403 and stops after a second 401", async () =>
       requests++;
       return new Response(null, { status });
     });
-    const client = new CrunchyrollClient(config, http, {
+    const client = new CrunchyrollClient(config, {
       async getAccessToken(rejected) {
         if (rejected) renewals++;
         return "token";
       },
-    });
+    }, http);
     await assert.rejects(
       async () => {
         for await (const _ of client.history()) {
@@ -270,12 +268,6 @@ test("history does not refresh on 403 and stops after a second 401", async () =>
 test("database migration preserves existing labels while binding the authenticated profile", () => {
   using store = new Store(":memory:");
   store.bindSource("account", "default");
-  assert.throws(
-    () => store.bindAuthenticatedSource("account", "wrong", "default", "profile"),
-    /previous CR_ACCESS_TOKEN/,
-  );
-  assert.equal(store.db.prepare("SELECT count(*) AS n FROM metadata").get()?.n, 1);
-  store.bindAuthenticatedSource("account", "profile", "default", "profile");
   store.bindAuthenticatedSource("account", "profile", "default");
   assert.throws(
     () => store.bindAuthenticatedSource("account", "wrong", "default"),

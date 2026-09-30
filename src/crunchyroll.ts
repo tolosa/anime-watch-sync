@@ -79,38 +79,18 @@ export function isWatched(
 
 export interface CrunchyrollConfig {
   baseUrl: string;
-  accessToken: string;
   accountId: string;
-  profileId: string;
   locale: string;
-}
-
-function assertTokenNotExpired(token: string): void {
-  const parts = token.split(".");
-  if (parts.length !== 3) return;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"));
-  } catch {
-    return; // Let the service validate opaque or malformed tokens.
-  }
-  const claims = z.object({ exp: z.number().finite() }).safeParse(payload);
-  // This is a local expiry hint, not JWT signature or authentication verification.
-  if (claims.success && claims.data.exp <= Date.now() / 1000) {
-    throw new Error(
-      "Crunchyroll: CR_ACCESS_TOKEN has expired according to its exp claim. Run pnpm dev auth login to save a renewable session, or replace the manual token in .env.",
-    );
-  }
 }
 
 export class CrunchyrollClient {
   private readonly config: CrunchyrollConfig;
   private readonly http: JsonHttpClient;
-  private readonly tokens: AccessTokenProvider | undefined;
+  private readonly tokens: AccessTokenProvider;
   constructor(
     config: CrunchyrollConfig,
+    tokens: AccessTokenProvider,
     http = createCrunchyrollHttpClient(),
-    tokens?: AccessTokenProvider,
   ) {
     this.config = config;
     this.http = http;
@@ -118,8 +98,7 @@ export class CrunchyrollClient {
   }
 
   private async requestHistory(url: URL): Promise<unknown> {
-    if (!this.tokens) assertTokenNotExpired(this.config.accessToken);
-    let accessToken = this.tokens ? await this.tokens.getAccessToken() : this.config.accessToken;
+    let accessToken = await this.tokens.getAccessToken();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return await this.http.request(url, {
@@ -129,8 +108,7 @@ export class CrunchyrollClient {
         if (
           !(error instanceof HttpError) ||
           error.status !== 401 ||
-          error.reason !== "http" ||
-          !this.tokens
+          error.reason !== "http"
         )
           throw error;
         if (attempt === 1)

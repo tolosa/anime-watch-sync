@@ -49,11 +49,3 @@ export function crunchyrollSettings() {
     locale: process.env.CR_LOCALE?.trim() || "en-US",
   };
 }
-
-export function crunchyrollConfig() {
-  return {
-    ...crunchyrollSettings(),
-    accessToken: token("CR_ACCESS_TOKEN"),
-    accountId: requiredEnv("CR_ACCOUNT_ID"),
-  };
-}

@@ -15,7 +15,9 @@ export class HttpError extends Error {
       reason === "cloudflare-challenge"
         ? "Cloudflare returned a browser challenge instead of an API response. This Node HTTP client cannot complete that challenge; refreshing the API token alone will not resolve it."
         : status === 401
-          ? "Access token expired or invalid; replace it in .env."
+          ? service === "Crunchyroll"
+            ? "Session expired or invalid; run pnpm dev auth login."
+            : "Access token expired or invalid; replace it in .env."
           : status === 403
             ? "Access denied. For Crunchyroll, verify your session/profile; a browser challenge may block this internal API."
             : status === 429
