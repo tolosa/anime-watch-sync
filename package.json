@@ -1,0 +1,33 @@
+{
+  "name": "anime-watch-sync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sync Crunchyroll watch history to SQLite and AniList from your terminal",
+  "type": "module",
+  "bin": {
+    "anime-watch-sync": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=26.8.0"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "node src/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "test:browser": "node --test test/browser-smoke.ts"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "impit": "0.14.5",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "devtools-protocol": "^0.0.1707781",
+    "typescript": "~7.0.2"
+  }
+}

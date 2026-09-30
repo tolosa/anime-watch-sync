@@ -1,0 +1,48 @@
+# Dependencies and local package caches
+node_modules/
+.pnpm-store/
+
+# Build output and TypeScript incremental state
+/dist/
+*.tsbuildinfo
+*.tgz
+
+# Credentials and machine-specific environment configuration
+.env
+.env.*
+!.env.example
+
+# Saved login credentials and temporary browser profiles
+cr-session.json
+*-cr-session.json
+cr-session.json.*.tmp
+*-cr-session.json.*.tmp
+.cr-login-*/
+
+# Local watch history, mappings, and SQLite sidecar files
+/data/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Test output and logs
+/coverage/
+.nyc_output/
+*.log
+pnpm-debug.log*
+
+# OS metadata and editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
