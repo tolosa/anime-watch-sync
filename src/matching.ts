@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { AniListClient, Media } from "./anilist.ts";
 import type { HistoryItem } from "./crunchyroll.ts";
 import type { Mapping } from "./database.ts";
@@ -6,9 +7,36 @@ import { clean } from "./terminal.ts";
 export interface LocalSeason {
   id: string;
   title: string;
+  crunchyrollUrl: string | null;
   queries: string[];
   episodes: number[];
   mappings: Mapping[];
+}
+
+const seriesMetadataSchema = z.object({
+  panel: z.object({
+    episode_metadata: z.object({
+      series_id: z.string().regex(/^[a-z0-9_-]+$/i),
+      series_slug_title: z.unknown().optional(),
+    }),
+  }),
+});
+
+function crunchyrollSeriesUrl(items: HistoryItem[]): string | null {
+  for (const item of items) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(item.raw);
+    } catch {
+      continue;
+    }
+    const parsed = seriesMetadataSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const { series_id: id, series_slug_title: slug } = parsed.data.panel.episode_metadata;
+    const suffix = typeof slug === "string" && /^[a-z0-9-]+$/i.test(slug) ? `/${slug}` : "";
+    return `https://www.crunchyroll.com/series/${id}${suffix}`;
+  }
+  return null;
 }
 
 function searchTitle(title: string): string {
@@ -52,6 +80,7 @@ export function localSeasons(history: HistoryItem[], mappings: Mapping[]): Local
       return {
         id,
         title: primary || id,
+        crunchyrollUrl: crunchyrollSeriesUrl(items),
         queries,
         episodes: [
           ...new Set(

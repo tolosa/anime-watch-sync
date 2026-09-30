@@ -156,6 +156,7 @@ async function matchSeason(
   prompt: MappingPrompt,
 ): Promise<Outcome> {
   prompt.write(`Season: ${season.title} (${season.id})`);
+  if (season.crunchyrollUrl) prompt.write(`Crunchyroll: ${season.crunchyrollUrl}`);
   prompt.write(`Local episode numbers: ${season.episodes.join(", ") || "unknown"}`);
   for (const mapping of season.mappings) {
     prompt.write(

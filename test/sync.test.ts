@@ -131,7 +131,8 @@ test("preview sends no mutations; apply writes and logs once; reruns consult liv
         assert.equal(body.variables.progress, 3);
         assert.equal(body.variables.mediaId, 42);
         assert.equal(body.variables.status, "COMPLETED");
-        assert.equal(body.variables.id, null);
+        assert.equal(Object.hasOwn(body.variables, "id"), false);
+        assert.doesNotMatch(body.query, /\$id\b/);
         remote = { id: 9, progress: body.variables.progress, status: body.variables.status };
         return Response.json({ data: { SaveMediaListEntry: remote } });
       }
@@ -148,6 +149,30 @@ test("preview sends no mutations; apply writes and logs once; reruns consult liv
   await syncAniList(store, client, { dryRun: false, threshold: 0.9 });
   assert.equal(mutations, 1);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM sync_log").get()?.n, 1);
+});
+
+test("saving an existing AniList entry retains its list entry ID", async () => {
+  const client = new AniListClient(
+    "token",
+    new JsonHttpClient(
+      "AniList",
+      mockFetch((_url, init) => {
+        const body = JSON.parse(String(init.body));
+        assert.match(body.query, /\$id: Int!/);
+        assert.match(body.query, /SaveMediaListEntry\(id: \$id,/);
+        assert.deepEqual(body.variables, { id: 9, mediaId: 42, progress: 2, status: "CURRENT" });
+        return Response.json({
+          data: { SaveMediaListEntry: { id: 9, progress: 2, status: "CURRENT" } },
+        });
+      }),
+    ),
+  );
+  const saved = await client.save(
+    media({ mediaListEntry: { id: 9, progress: 1, status: "CURRENT" } }),
+    2,
+    "CURRENT",
+  );
+  assert.equal(saved.progress, 2);
 });
 
 test("failed GraphQL mutations do not produce a successful sync log", async () => {

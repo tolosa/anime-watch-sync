@@ -132,6 +132,8 @@ pnpm start sync --pull --apply
 
 Run `pnpm dev map` to walk through seasons with no saved mappings. The app searches AniList using each season's stored title and series title, removes dub/language annotations from search terms, combines duplicate results, and orders candidates by title similarity. Each numbered option shows its English/romaji titles, format, episode count, AniList ID, and link. Choose a number, then review and save the mapping.
 
+The season heading includes a Crunchyroll show-page link when its saved history contains a series ID. Links use the existing archived metadata, so previously imported seasons work without another pull. Records without series metadata omit the link.
+
 At the choices prompt, use `s` to search another title, `i` to enter an AniList ID, **Enter** to skip, or `q` to quit. At the review prompt, **Enter** saves, `n` returns to the matches, `e` edits the episode range and offset, and `k` skips. Quitting or pressing Ctrl+C/Ctrl+D keeps mappings already saved and leaves the current selection unsaved. Searches and mapping choices never change your AniList list; run `sync` to preview progress changes afterward.
 
 ```sh

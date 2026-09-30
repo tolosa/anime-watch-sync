@@ -105,12 +105,15 @@ export class AniListClient {
   }
 
   async save(media: Media, progress: number, status: ListStatus): Promise<ListEntry> {
+    // AniList validates an explicit null id as an invalid list entry ID.
+    // For new entries, omit the argument entirely and identify the anime by mediaId.
+    const entryId = media.mediaListEntry?.id;
     const entry = (
       await this.query(
-        `mutation ($id: Int, $mediaId: Int!, $progress: Int!, $status: MediaListStatus!) {
-      SaveMediaListEntry(id: $id, mediaId: $mediaId, progress: $progress, status: $status) { id progress status }
+        `mutation (${entryId === undefined ? "" : "$id: Int!, "}$mediaId: Int!, $progress: Int!, $status: MediaListStatus!) {
+      SaveMediaListEntry(${entryId === undefined ? "" : "id: $id, "}mediaId: $mediaId, progress: $progress, status: $status) { id progress status }
     }`,
-        { id: media.mediaListEntry?.id ?? null, mediaId: media.id, progress, status },
+        { ...(entryId === undefined ? {} : { id: entryId }), mediaId: media.id, progress, status },
         z.object({ SaveMediaListEntry: listSchema }),
         true,
       )
