@@ -9,7 +9,7 @@ import { renewSession, SessionFile, SessionManager } from "./crunchyroll-session
 import { Store } from "./database.ts";
 import { type MappingOptions, mapInteractively } from "./interactive-map.ts";
 import { localSeasons } from "./matching.ts";
-import { syncAniList } from "./sync.ts";
+import { formatWatchDates, syncAniList } from "./sync.ts";
 import { clean, TerminalPrompt } from "./terminal.ts";
 
 loadEnvironment();
@@ -331,7 +331,7 @@ program
       threshold: watchedThreshold,
       report: (plan) =>
         console.log(
-          `${plan.action === "update" ? (dryRun ? "WOULD UPDATE" : "UPDATED") : "SKIP"} ${clean(plan.title)} (${plan.mediaId}): ${plan.previous} → ${plan.progress}, ${plan.status}. ${plan.reason}`,
+          `${plan.action === "update" ? (dryRun ? "WOULD UPDATE" : "UPDATED") : "SKIP"} ${clean(plan.title)} (${plan.mediaId}): ${plan.previous} → ${plan.progress}, ${plan.status}. ${plan.reason}${Object.keys(plan.dates).length ? `. Dates: ${formatWatchDates(plan.dates)}` : ""}`,
         ),
     });
     console.log(

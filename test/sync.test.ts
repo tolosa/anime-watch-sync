@@ -133,7 +133,17 @@ test("preview sends no mutations; apply writes and logs once; reruns consult liv
         assert.equal(body.variables.status, "COMPLETED");
         assert.equal(Object.hasOwn(body.variables, "id"), false);
         assert.doesNotMatch(body.query, /\$id\b/);
-        remote = { id: 9, progress: body.variables.progress, status: body.variables.status };
+        assert.deepEqual(body.variables.startedAt, { year: 2026, month: 9, day: 29 });
+        assert.deepEqual(body.variables.completedAt, { year: 2026, month: 9, day: 29 });
+        assert.match(body.query, /\$startedAt: FuzzyDateInput!/);
+        assert.match(body.query, /completedAt: \$completedAt/);
+        remote = {
+          id: 9,
+          progress: body.variables.progress,
+          status: body.variables.status,
+          startedAt: body.variables.startedAt,
+          completedAt: body.variables.completedAt,
+        };
         return Response.json({ data: { SaveMediaListEntry: remote } });
       }
       return Response.json({ data: { Media: media({ episodes: 3, mediaListEntry: remote }) } });
@@ -196,6 +206,158 @@ test("failed GraphQL mutations do not produce a successful sync log", async () =
   await assert.rejects(
     syncAniList(store, client, { dryRun: false, threshold: 0.9 }),
     /GraphQL errors/,
+  );
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM sync_log").get()?.n, 0);
+});
+
+test("watch dates respect split mappings, deduplicate dubs, and handle out-of-order viewing", () => {
+  const collected = collectProgress(
+    [
+      episode(12, { watchedAt: "2020-01-01T12:00:00Z" }),
+      episode(13, { watchedAt: "2024-06-01T12:00:00Z" }),
+      episode(13, { id: "DUB", watchedAt: "2025-08-01T12:00:00Z" }),
+      episode(14, { watchedAt: "2024-06-10T12:00:00Z" }),
+      episode(15, { watchedAt: "2024-06-05T12:00:00Z" }),
+      episode(16, { fullyWatched: false, playhead: 10, watchedAt: "2025-09-01T12:00:00Z" }),
+    ],
+    [{ ...mapping, from: 13, to: 16, offset: 12 }],
+    0.9,
+  );
+  const plan = planProgress(collected.groups[0]!, media({ episodes: 3 }));
+  assert.deepEqual(plan.dates, {
+    startedAt: { year: 2024, month: 6, day: 1 },
+    completedAt: { year: 2024, month: 6, day: 10 },
+  });
+});
+
+test("incomplete or invalid timestamp history never invents start/finish dates", () => {
+  const makeGroup = (items: ReturnType<typeof episode>[]) =>
+    collectProgress(items, [mapping], 0.9).groups[0]!;
+  const completed = media({
+    episodes: 3,
+    mediaListEntry: { id: 9, progress: 3, status: "COMPLETED" },
+  });
+  assert.deepEqual(planProgress(makeGroup([episode(2), episode(3)]), completed).dates, {});
+  for (const watchedAt of [null, "invalid"]) {
+    const plan = planProgress(
+      makeGroup([episode(1), episode(2, { watchedAt }), episode(3)]),
+      completed,
+    );
+    assert.ok(plan.dates.startedAt);
+    assert.equal(plan.dates.completedAt, undefined);
+  }
+  assert.deepEqual(planProgress(makeGroup([episode(1, { watchedAt: null })]), media()).dates, {});
+  assert.equal(
+    planProgress(makeGroup([episode(1), episode(3)]), completed).dates.completedAt,
+    undefined,
+  );
+  const unknown = planProgress(makeGroup([episode(1), episode(2)]), media({ episodes: null }));
+  assert.ok(unknown.dates.startedAt);
+  assert.equal(unknown.dates.completedAt, undefined);
+  const overflow = planProgress(makeGroup([episode(1), episode(4)]), completed);
+  assert.equal(overflow.action, "skip");
+  assert.deepEqual(overflow.dates, {});
+});
+
+test("dates replace existing values without changing preserved progress/status", () => {
+  const group = collectProgress([episode(1), episode(2), episode(3)], [mapping], 0.9).groups[0]!;
+  for (const status of ["COMPLETED", "REPEATING", "PAUSED", "DROPPED", "CURRENT"] as const) {
+    const plan = planProgress(
+      group,
+      media({
+        episodes: 3,
+        mediaListEntry: {
+          id: 9,
+          progress: 3,
+          status,
+          startedAt: { year: 2026, month: 9, day: 30 },
+          completedAt: { year: 2026, month: 9, day: 30 },
+        },
+      }),
+    );
+    assert.equal(plan.action, "update");
+    assert.equal(plan.progress, 3);
+    assert.equal(plan.status, status);
+    assert.deepEqual(plan.dates.startedAt, { year: 2026, month: 9, day: 29 });
+    assert.equal(Boolean(plan.dates.completedAt), status === "COMPLETED");
+  }
+});
+
+test("date-only backfills preview, apply, and converge for already completed entries", async () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode(1), episode(2)]);
+  store.setMapping(mapping);
+  let remote: ListEntry = {
+    id: 9,
+    progress: 2,
+    status: "COMPLETED",
+    startedAt: { year: 2026, month: 9, day: 30 },
+    completedAt: { year: 2026, month: 9, day: 30 },
+  };
+  let writes = 0;
+  const client = new AniListClient(
+    "token",
+    new JsonHttpClient(
+      "AniList",
+      mockFetch((_url, init) => {
+        const body = JSON.parse(String(init.body));
+        if (body.query.includes("Viewer"))
+          return Response.json({ data: { Viewer: { id: 7, name: "tester" } } });
+        if (body.query.includes("SaveMediaListEntry")) {
+          writes++;
+          assert.equal(body.variables.progress, 2);
+          assert.equal(body.variables.status, "COMPLETED");
+          remote = {
+            ...remote,
+            startedAt: body.variables.startedAt,
+            completedAt: body.variables.completedAt,
+          };
+          return Response.json({ data: { SaveMediaListEntry: remote } });
+        }
+        return Response.json({ data: { Media: media({ episodes: 2, mediaListEntry: remote }) } });
+      }),
+    ),
+  );
+  const preview = await syncAniList(store, client, { dryRun: true, threshold: 0.9 });
+  assert.equal(preview.plans[0]?.action, "update");
+  assert.equal(writes, 0);
+  await syncAniList(store, client, { dryRun: false, threshold: 0.9 });
+  const repeat = await syncAniList(store, client, { dryRun: false, threshold: 0.9 });
+  assert.equal(repeat.plans[0]?.action, "skip");
+  assert.equal(writes, 1);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM sync_log").get()?.n, 1);
+});
+
+test("unconfirmed watch dates fail without recording a successful sync", async () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode(1)]);
+  store.setMapping(mapping);
+  const client = new AniListClient(
+    "token",
+    new JsonHttpClient(
+      "AniList",
+      mockFetch((_url, init) => {
+        const body = JSON.parse(String(init.body));
+        if (body.query.includes("Viewer"))
+          return Response.json({ data: { Viewer: { id: 7, name: "tester" } } });
+        if (body.query.includes("SaveMediaListEntry"))
+          return Response.json({
+            data: {
+              SaveMediaListEntry: {
+                id: 9,
+                progress: 1,
+                status: "CURRENT",
+                startedAt: { year: 2026, month: 9, day: 30 },
+              },
+            },
+          });
+        return Response.json({ data: { Media: media() } });
+      }),
+    ),
+  );
+  await assert.rejects(
+    syncAniList(store, client, { dryRun: false, threshold: 0.9 }),
+    /confirm.*watch dates/,
   );
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM sync_log").get()?.n, 0);
 });

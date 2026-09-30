@@ -10,10 +10,27 @@ export const statusSchema = z.enum([
   "REPEATING",
 ]);
 export type ListStatus = z.infer<typeof statusSchema>;
+const dateSchema = z.object({
+  year: z.number().int().nullable(),
+  month: z.number().int().nullable(),
+  day: z.number().int().nullable(),
+});
+export type WatchDate = { year: number; month: number; day: number };
+export interface WatchDates {
+  startedAt?: WatchDate;
+  completedAt?: WatchDate;
+}
+
+export function sameDate(a: z.infer<typeof dateSchema> | null | undefined, b: WatchDate): boolean {
+  return a?.year === b.year && a.month === b.month && a.day === b.day;
+}
+
 const listSchema = z.object({
   id: z.number().int(),
   progress: z.number().int().nonnegative(),
   status: statusSchema,
+  startedAt: dateSchema.nullish(),
+  completedAt: dateSchema.nullish(),
 });
 const mediaSchema = z.object({
   id: z.number().int(),
@@ -24,7 +41,8 @@ const mediaSchema = z.object({
 });
 export type Media = z.infer<typeof mediaSchema>;
 export type ListEntry = z.infer<typeof listSchema>;
-const fields = "id title { romaji english } episodes format mediaListEntry { id progress status }";
+const listFields = "id progress status startedAt { year month day } completedAt { year month day }";
+const fields = `id title { romaji english } episodes format mediaListEntry { ${listFields} }`;
 
 export function mediaTitle(media: Pick<Media, "title" | "id">): string {
   return media.title.english ?? media.title.romaji ?? `AniList ${media.id}`;
@@ -104,16 +122,32 @@ export class AniListClient {
     ).Media;
   }
 
-  async save(media: Media, progress: number, status: ListStatus): Promise<ListEntry> {
+  async save(
+    media: Media,
+    progress: number,
+    status: ListStatus,
+    dates: WatchDates = {},
+  ): Promise<ListEntry> {
     // AniList validates an explicit null id as an invalid list entry ID.
     // For new entries, omit the argument entirely and identify the anime by mediaId.
     const entryId = media.mediaListEntry?.id;
+    const dateKeys = (["startedAt", "completedAt"] as const).filter(
+      (key) => dates[key] !== undefined,
+    );
+    const dateVariables = dateKeys.map((key) => `, $${key}: FuzzyDateInput!`).join("");
+    const dateArguments = dateKeys.map((key) => `, ${key}: $${key}`).join("");
     const entry = (
       await this.query(
-        `mutation (${entryId === undefined ? "" : "$id: Int!, "}$mediaId: Int!, $progress: Int!, $status: MediaListStatus!) {
-      SaveMediaListEntry(${entryId === undefined ? "" : "id: $id, "}mediaId: $mediaId, progress: $progress, status: $status) { id progress status }
+        `mutation (${entryId === undefined ? "" : "$id: Int!, "}$mediaId: Int!, $progress: Int!, $status: MediaListStatus!${dateVariables}) {
+      SaveMediaListEntry(${entryId === undefined ? "" : "id: $id, "}mediaId: $mediaId, progress: $progress, status: $status${dateArguments}) { ${listFields} }
     }`,
-        { ...(entryId === undefined ? {} : { id: entryId }), mediaId: media.id, progress, status },
+        {
+          ...(entryId === undefined ? {} : { id: entryId }),
+          mediaId: media.id,
+          progress,
+          status,
+          ...dates,
+        },
         z.object({ SaveMediaListEntry: listSchema }),
         true,
       )
@@ -121,6 +155,10 @@ export class AniListClient {
     if (entry.progress !== progress || entry.status !== status)
       throw new Error(
         "AniList did not confirm the requested progress/status. Rerun sync to reconcile.",
+      );
+    if (dateKeys.some((key) => !sameDate(entry[key], dates[key]!)))
+      throw new Error(
+        "AniList did not confirm the requested watch dates. Rerun sync to reconcile.",
       );
     return entry;
   }
