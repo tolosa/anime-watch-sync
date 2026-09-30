@@ -105,11 +105,7 @@ export class CrunchyrollClient {
           headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
         });
       } catch (error) {
-        if (
-          !(error instanceof HttpError) ||
-          error.status !== 401 ||
-          error.reason !== "http"
-        )
+        if (!(error instanceof HttpError) || error.status !== 401 || error.reason !== "http")
           throw error;
         if (attempt === 1)
           throw new Error(

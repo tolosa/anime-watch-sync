@@ -10,7 +10,11 @@ const config = {
   locale: "en-US",
 };
 
-const tokens = { async getAccessToken() { return "secret"; } };
+const tokens = {
+  async getAccessToken() {
+    return "secret";
+  },
+};
 
 test("normalizes nested episode metadata and converts playhead seconds to duration milliseconds", () => {
   const item = normalizeEntry(rawEpisode(2, { fully_watched: false, playhead: 1296 }));
@@ -76,12 +80,18 @@ test("uses total across short pages and ends on an empty history", async () => {
     "Crunchyroll",
     mockFetch(() => Response.json({ data: [rawEpisode(++calls)], total: 2 })),
   );
-  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length, 2);
+  assert.equal(
+    (await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length,
+    2,
+  );
   const empty = new JsonHttpClient(
     "Crunchyroll",
     mockFetch(() => Response.json({ data: [], total: 0 })),
   );
-  assert.deepEqual(await Array.fromAsync(new CrunchyrollClient(config, tokens, empty).history()), []);
+  assert.deepEqual(
+    await Array.fromAsync(new CrunchyrollClient(config, tokens, empty).history()),
+    [],
+  );
 });
 
 test("follows relative cursor links and rejects missing or repeated cursors", async () => {
@@ -102,7 +112,10 @@ test("follows relative cursor links and rejects missing or repeated cursors", as
       );
     }),
   );
-  assert.equal((await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length, 2);
+  assert.equal(
+    (await Array.fromAsync(new CrunchyrollClient(config, tokens, http).history())).length,
+    2,
+  );
   assert.deepEqual(requested, ["1", "next-cursor"]);
 
   const missing = new JsonHttpClient(
@@ -249,16 +262,24 @@ test("does not label every Cloudflare-served 403 as a challenge", async () => {
   );
 });
 
-
 test("a missing session stops history requests before contacting Crunchyroll", async () => {
   let calls = 0;
-  const http = new JsonHttpClient("Crunchyroll", mockFetch(() => {
-    calls++;
-    return Response.json({ data: [] });
-  }));
-  const client = new CrunchyrollClient(config, {
-    async getAccessToken() { throw new Error("No Crunchyroll session saved. Run pnpm dev auth login."); },
-  }, http);
+  const http = new JsonHttpClient(
+    "Crunchyroll",
+    mockFetch(() => {
+      calls++;
+      return Response.json({ data: [] });
+    }),
+  );
+  const client = new CrunchyrollClient(
+    config,
+    {
+      async getAccessToken() {
+        throw new Error("No Crunchyroll session saved. Run pnpm dev auth login.");
+      },
+    },
+    http,
+  );
   await assert.rejects(Array.fromAsync(client.history()), /auth login/);
   assert.equal(calls, 0);
 });

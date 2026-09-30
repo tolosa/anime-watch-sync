@@ -62,11 +62,7 @@ export class Store implements Disposable {
     this.bind("Crunchyroll source", JSON.stringify([accountId, profileId]), true);
   }
 
-  bindAuthenticatedSource(
-    accountId: string,
-    profileId: string,
-    label: string,
-  ): void {
+  bindAuthenticatedSource(accountId: string, profileId: string, label: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.bindSource(accountId, label);
@@ -144,7 +140,7 @@ export class Store implements Disposable {
       .all() as unknown as Mapping[];
   }
 
-  setMapping(mapping: Mapping): void {
+  validateMapping(mapping: Mapping): void {
     const { seasonId, mediaId, from, to, offset } = mapping;
     if (
       !seasonId ||
@@ -174,6 +170,11 @@ export class Store implements Disposable {
       throw new Error(
         `Episode range overlaps the mapping starting at ${overlap.from}. Remove it or narrow the range first.`,
       );
+  }
+
+  setMapping(mapping: Mapping): void {
+    this.validateMapping(mapping);
+    const { seasonId, mediaId, from, to, offset } = mapping;
     this.db
       .prepare(`INSERT INTO mappings VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(season_id, episode_from) DO UPDATE SET media_id = excluded.media_id,

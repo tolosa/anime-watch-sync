@@ -101,15 +101,8 @@ This uses AniList's [implicit grant](https://docs.anilist.co/guide/auth/implicit
 # Import all history currently exposed by Crunchyroll.
 pnpm dev pull
 
-# Inspect local records and copy season IDs.
-pnpm dev history --limit 20
-pnpm dev seasons
-
-# Find the correct AniList entry for a season.
-pnpm dev search "Frieren"
-
-# Replace these example IDs with the IDs from seasons/search.
-pnpm dev map CR_SEASON_ID ANILIST_ID
+# Automatically search AniList and interactively match unmapped seasons.
+pnpm dev map
 
 # Preview proposed changes using current AniList progress.
 pnpm dev sync
@@ -137,7 +130,28 @@ pnpm start sync --pull --apply
 
 ## Season mappings
 
-Mappings are explicit because Crunchyroll and AniList do not consistently split seasons, split-season parts, specials, and dubbed versions the same way. `search` provides candidate IDs; `map` validates the selected AniList anime and stores the mapping. Title matching never automatically changes your list.
+Run `pnpm dev map` to walk through seasons with no saved mappings. The app searches AniList using each season's stored title and series title, removes dub/language annotations from search terms, combines duplicate results, and orders candidates by title similarity. Each numbered option shows its English/romaji titles, format, episode count, AniList ID, and link. Choose a number, then review and save the mapping.
+
+At the choices prompt, use `s` to search another title, `i` to enter an AniList ID, **Enter** to skip, or `q` to quit. At the review prompt, **Enter** saves, `n` returns to the matches, `e` edits the episode range and offset, and `k` skips. Quitting or pressing Ctrl+C/Ctrl+D keeps mappings already saved and leaves the current selection unsaved. Searches and mapping choices never change your AniList list; run `sync` to preview progress changes afterward.
+
+```sh
+# Search and choose a match for one season, including an already mapped season.
+pnpm dev map CR_SEASON_ID
+
+# Start the interactive review with a specific range and offset.
+pnpm dev map CR_SEASON_ID --from 13 --to 24 --offset 12
+
+# Map directly with both IDs, including from scripts without a terminal.
+pnpm dev map CR_SEASON_ID ANILIST_ID
+
+# Inspect saved mappings or search separately.
+pnpm dev seasons
+pnpm dev search "Frieren"
+```
+
+Crunchyroll and AniList do not consistently split seasons, split-season parts, specials, and dubbed versions the same way, so suggested matches still need your selection. The interactive review rejects overlapping ranges and episode numbers exceeding the selected entry's known total. It does not infer offsets from the earliest episode in your history, which might be incomplete. Interactive mode requires a terminal; provide both IDs for non-interactive use.
+
+The batch flow skips any season that already has a mapping, including a partially mapped season. To add another part or change a saved match, use `map <season-id>` with the appropriate range, or edit it at the review prompt. Batch mode saves one range per season per run; `--from`, `--to`, and `--offset` apply to a specified season.
 
 Each mapping covers an inclusive range of Crunchyroll episode numbers:
 
@@ -192,7 +206,7 @@ The app imports only the history Crunchyroll currently exposes. It cannot recons
 | `history [--limit 20]` | Inspect recent local records |
 | `seasons` | Show local season IDs and saved mappings |
 | `search "title"` | Search AniList anime |
-| `map <season-id> <anilist-id>` | Save a mapping; supports `--from`, `--to`, `--offset` |
+| `map [season-id] [anilist-id]` | Search and choose matches interactively; omit both IDs for unmapped seasons, or supply both for direct mapping; supports `--from`, `--to`, `--offset` |
 | `unmap <season-id> [--from 1]` | Remove a mapping |
 | `auth-url [--client-id ID]` | Print the AniList authorization URL |
 | `sync [--pull] [--apply / --dry-run]` | Preview or apply watch progress |

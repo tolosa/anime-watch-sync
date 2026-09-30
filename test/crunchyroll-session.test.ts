@@ -226,11 +226,15 @@ test("history retries the same page once on 401 and uses the renewed token", asy
     tokens.push(new Headers(init?.headers).get("authorization")!);
     return tokens.length === 1 ? new Response(null, { status: 401 }) : Response.json({ data: [] });
   });
-  const client = new CrunchyrollClient(config, {
-    async getAccessToken(rejected) {
-      return rejected === "old" ? "renewed" : "old";
+  const client = new CrunchyrollClient(
+    config,
+    {
+      async getAccessToken(rejected) {
+        return rejected === "old" ? "renewed" : "old";
+      },
     },
-  }, http);
+    http,
+  );
   for await (const _ of client.history()) assert.fail("empty history should not yield");
   assert.deepEqual(tokens, ["Bearer old", "Bearer renewed"]);
   assert.equal(urls[0], urls[1]);
@@ -244,12 +248,16 @@ test("history does not refresh on 403 and stops after a second 401", async () =>
       requests++;
       return new Response(null, { status });
     });
-    const client = new CrunchyrollClient(config, {
-      async getAccessToken(rejected) {
-        if (rejected) renewals++;
-        return "token";
+    const client = new CrunchyrollClient(
+      config,
+      {
+        async getAccessToken(rejected) {
+          if (rejected) renewals++;
+          return "token";
+        },
       },
-    }, http);
+      http,
+    );
     await assert.rejects(
       async () => {
         for await (const _ of client.history()) {

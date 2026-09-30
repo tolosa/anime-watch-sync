@@ -84,20 +84,37 @@ test("auth status and logout operate locally without disclosing saved credential
   );
 });
 
-
 test("obsolete credentials in .env cannot authenticate without a session file", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "watch-sync-env-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const expiredToken = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString("base64url")}.signature`;
-  await writeFile(join(directory, ".env"), `CR_ACCESS_TOKEN=${expiredToken}\nCR_ACCOUNT_ID=obsolete-account\nANILIST_ACCESS_TOKEN=test-anilist-token\n`, { mode: 0o600 });
+  await writeFile(
+    join(directory, ".env"),
+    `CR_ACCESS_TOKEN=${expiredToken}\nCR_ACCOUNT_ID=obsolete-account\nANILIST_ACCESS_TOKEN=test-anilist-token\n`,
+    { mode: 0o600 },
+  );
   const env = { ...process.env };
   delete env.CR_ACCESS_TOKEN;
   delete env.CR_ACCOUNT_ID;
   delete env.ANILIST_ACCESS_TOKEN;
   for (const command of [["pull"], ["sync", "--pull"]]) {
-    const result = spawnSync(process.execPath, [cli, "--db", ":memory:", "--session-file", join(directory, "missing-session.json"), ...command], {
-      cwd: directory, env, encoding: "utf8", timeout: 5000,
-    });
+    const result = spawnSync(
+      process.execPath,
+      [
+        cli,
+        "--db",
+        ":memory:",
+        "--session-file",
+        join(directory, "missing-session.json"),
+        ...command,
+      ],
+      {
+        cwd: directory,
+        env,
+        encoding: "utf8",
+        timeout: 5000,
+      },
+    );
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /No Crunchyroll session saved.*auth login/);
     assert.doesNotMatch(result.stderr, /obsolete-account|CR_ACCESS_TOKEN|CR_ACCOUNT_ID/);
