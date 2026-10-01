@@ -9,6 +9,7 @@ export interface Mapping {
   from: number;
   to: number | null;
   offset: number;
+  mode?: "count";
 }
 
 export class Store implements Disposable {
@@ -41,6 +42,15 @@ export class Store implements Disposable {
         status TEXT NOT NULL, synced_at TEXT NOT NULL
       ) STRICT;
     `);
+    if (
+      !this.db
+        .prepare("PRAGMA table_info(mappings)")
+        .all()
+        .some((column) => column.name === "mode")
+    ) {
+      this.db.exec(`ALTER TABLE mappings ADD COLUMN mode TEXT NOT NULL DEFAULT 'legacy'
+        CHECK(mode IN ('legacy', 'count'))`);
+    }
   }
 
   [Symbol.dispose](): void {
@@ -135,15 +145,20 @@ export class Store implements Disposable {
   mappings(): Mapping[] {
     return this.db
       .prepare(`SELECT season_id AS seasonId, media_id AS mediaId,
-      episode_from AS "from", episode_to AS "to", episode_offset AS offset
+      episode_from AS "from", episode_to AS "to", episode_offset AS offset, mode
       FROM mappings ORDER BY season_id, episode_from`)
-      .all() as unknown as Mapping[];
+      .all()
+      .map(({ mode, ...mapping }) =>
+        mode === "count" ? { ...mapping, mode } : mapping,
+      ) as unknown as Mapping[];
   }
 
   validateMapping(mapping: Mapping): void {
     const { seasonId, mediaId, from, to, offset } = mapping;
     if (
       !seasonId ||
+      (mapping.mode !== undefined && mapping.mode !== "count") ||
+      (mapping.mode === "count" && (from !== 1 || to !== null || offset !== 0)) ||
       ![mediaId, from, offset].every(Number.isSafeInteger) ||
       mediaId < 1 ||
       from < 1 ||
@@ -176,13 +191,33 @@ export class Store implements Disposable {
     this.validateMapping(mapping);
     const { seasonId, mediaId, from, to, offset } = mapping;
     this.db
-      .prepare(`INSERT INTO mappings VALUES (?, ?, ?, ?, ?)
+      .prepare(`INSERT INTO mappings
+        (season_id, media_id, episode_from, episode_to, episode_offset, mode)
+        VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(season_id, episode_from) DO UPDATE SET media_id = excluded.media_id,
-      episode_to = excluded.episode_to, episode_offset = excluded.episode_offset`)
-      .run(seasonId, mediaId, from, to, offset);
+      episode_to = excluded.episode_to, episode_offset = excluded.episode_offset,
+      mode = excluded.mode`)
+      .run(seasonId, mediaId, from, to, offset, mapping.mode ?? "legacy");
   }
 
-  removeMapping(seasonId: string, from: number): number {
+  setSeasonMapping(seasonId: string, mediaId: number): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.removeMapping(seasonId);
+      this.setMapping({ seasonId, mediaId, from: 1, to: null, offset: 0, mode: "count" });
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  removeMapping(seasonId: string, from?: number): number {
+    if (from === undefined) {
+      return Number(
+        this.db.prepare("DELETE FROM mappings WHERE season_id = ?").run(seasonId).changes,
+      );
+    }
     return Number(
       this.db
         .prepare("DELETE FROM mappings WHERE season_id = ? AND episode_from = ?")

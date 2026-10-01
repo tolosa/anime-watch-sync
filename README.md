@@ -134,14 +134,11 @@ Run `pnpm dev map` to walk through seasons with no saved mappings. The app searc
 
 The season heading includes a Crunchyroll show-page link when its saved history contains a series ID. Links use the existing archived metadata, so previously imported seasons work without another pull. Records without series metadata omit the link.
 
-At the choices prompt, use `s` to search another title, `i` to enter an AniList ID, **Enter** to skip, or `q` to quit. At the review prompt, **Enter** saves, `n` returns to the matches, `e` edits the episode range and offset, and `k` skips. Quitting or pressing Ctrl+C/Ctrl+D keeps mappings already saved and leaves the current selection unsaved. Searches and mapping choices never change your AniList list; run `sync` to preview progress changes afterward.
+At the choices prompt, use `s` to search another title, `i` to enter an AniList ID, **Enter** to skip, or `q` to quit. The review shows the watched Crunchyroll episode count and the viewed count for the selected AniList entry, capped at its known episode total. There are no episode ranges or offsets to edit. At the review prompt, **Enter** saves, `n` returns to the matches, `k` skips, and `q` quits. Quitting or pressing Ctrl+C/Ctrl+D keeps mappings already saved and leaves the current selection unsaved. Searches and mapping choices only save local mappings; AniList mutations happen only with `sync --apply`. Run `sync` to preview progress changes afterward.
 
 ```sh
 # Search and choose a match for one season, including an already mapped season.
 pnpm dev map CR_SEASON_ID
-
-# Start the interactive review with a specific range and offset.
-pnpm dev map CR_SEASON_ID --from 13 --to 24 --offset 12
 
 # Map directly with both IDs, including from scripts without a terminal.
 pnpm dev map CR_SEASON_ID ANILIST_ID
@@ -151,46 +148,29 @@ pnpm dev seasons
 pnpm dev search "Frieren"
 ```
 
-Crunchyroll and AniList do not consistently split seasons, split-season parts, specials, and dubbed versions the same way, so suggested matches still need your selection. The interactive review rejects overlapping ranges and episode numbers exceeding the selected entry's known total. It does not infer offsets from the earliest episode in your history, which might be incomplete. Interactive mode requires a terminal; provide both IDs for non-interactive use.
+Crunchyroll and AniList do not consistently split seasons, split-season parts, specials, and dubbed versions the same way, so suggested matches still need your selection. Each new mapping links one whole Crunchyroll season to one AniList entry using **watched-count syncing**. The count includes distinct watched positive integer episode numbers, using `WATCHED_THRESHOLD` (default 90%) or Crunchyroll's completed flag. Duplicate language versions within a season count once; partially watched episodes below the threshold do not count. A season with zero watched episodes can still be mapped.
 
-The batch flow skips any season that already has a mapping, including a partially mapped season. To add another part or change a saved match, use `map <season-id>` with the appropriate range, or edit it at the review prompt. Batch mode saves one range per season per run; `--from`, `--to`, and `--offset` apply to a specified season.
+Episode numbering and gaps do not determine progress: watched episodes 13, 15, and 24 contribute **3 viewed episodes**, not 24 and not zero. A count above AniList's known total is capped; an unknown total leaves the count uncapped. This is a local count preview, not a promise to overwrite remote progress: sync preserves higher AniList progress and protected statuses.
 
-Each mapping covers an inclusive range of Crunchyroll episode numbers:
+The batch flow skips any season that already has a mapping, including legacy or partially mapped seasons. Use `map <season-id>` to change a match or switch to watched-count syncing. After confirmation, saving replaces **all existing mappings for that season**, not just one range. Rejecting or cancelling leaves them intact. Interactive mode requires a terminal; providing both IDs saves directly without confirmation and also replaces all mappings for that season. The `map` flags `--from`, `--to`, and `--offset` have been removed. Creating new split-season/range mappings is no longer supported.
 
-```text
-AniList episode = Crunchyroll episode − offset
-```
+Multiple Crunchyroll season IDs, including separate dubs, can map to the same AniList entry. Count mappings use the **maximum watched count across those seasons, not their sum**, even when numbering differs. For example, counts of 3 and 5 yield 5, not 8. Do not use this to add separate parts together. Movies appear under `movie:CONTENT_ID` and count as one episode. Entries with missing season metadata, missing episode numbers, non-positive numbers, or fractional specials remain archived but do not advance AniList progress.
 
-For example, if Crunchyroll numbers a second season as episodes 13–24, but AniList numbers it 1–12:
+**Legacy compatibility:** Existing range/offset mappings are retained with their original behavior until you explicitly remap or remove them. `seasons` identifies them as legacy mappings. They still combine mapped episode numbers, advance only through consecutive watched episodes after current AniList progress, and skip an entry if a mapped episode exceeds its known total. Count and legacy range mappings cannot be combined for the same AniList entry: sync fails with `Cannot mix count and range mappings for AniList media …`. Remap the remaining legacy seasons targeting that entry to count mode (or remove their mappings) before syncing again.
 
 ```sh
-pnpm dev map CR_SEASON_ID ANILIST_SEASON_2_ID --from 13 --to 24 --offset 12
-```
-
-If one Crunchyroll season covers two AniList entries:
-
-```sh
-pnpm dev map CR_SEASON_ID ANILIST_PART_1_ID --from 1 --to 12
-pnpm dev map CR_SEASON_ID ANILIST_PART_2_ID --from 13 --to 24 --offset 12
-```
-
-The defaults are `--from 1`, no upper bound, and `--offset 0`. Negative offsets support the reverse case: Crunchyroll episode 1 can map to AniList episode 13 with `--offset -12`. Overlapping ranges for the same season are rejected. Running `map` again with the same season ID and `--from` replaces that mapping. Narrow an existing open-ended range before adding a second one.
-
-Multiple Crunchyroll season IDs, including separate dubs, can map to the same AniList entry. Watched episode numbers are combined and deduplicated. Movies appear under `movie:CONTENT_ID` and map as one episode. Entries with missing metadata, missing episode numbers, or fractional specials remain archived but do not advance AniList progress.
-
-```sh
-pnpm dev unmap CR_SEASON_ID              # Removes the range starting at 1.
-pnpm dev unmap CR_SEASON_ID --from 13    # Removes only that range.
+pnpm dev unmap CR_SEASON_ID              # Removes ALL mappings for this season.
+pnpm dev unmap CR_SEASON_ID --from 13    # Legacy: removes only the mapping starting at 13.
 ```
 
 ## Sync behavior
 
 - An episode counts as watched when Crunchyroll reports `fully_watched`, or the playhead reaches `WATCHED_THRESHOLD` of its runtime (default **90%**). Playheads are seconds; durations are milliseconds. Unknown/zero runtime never passes the threshold by itself.
 - Local history is an archive keyed by content ID, not an append-only log of every viewing. Reimports preserve the highest playhead and completed flag, so starting a rewatch does not erase prior completion. Raw JSON from the most recent import is kept separately.
-- Progress advances through **consecutive watched episode numbers after the current AniList progress**. For example, local episodes 1, 2, 4 advance a new list entry to 2; episode 3 must be watched before it can advance to 4. Remote progress 10 plus local watched episodes 11 and 12 advances to 12 even if older history is unavailable.
+- New mappings sync the **number of distinct watched episodes**, regardless of gaps or high numbering. For example, local episodes 1, 2, 4 give a count of 3. Multiple count-mapped seasons targeting one AniList entry contribute their maximum count, not a sum. Counts are absolute progress, not additions to remote progress: remote progress 10 and a local count of 2 stay at 10.
 - Higher AniList progress is preserved. Existing `COMPLETED`, `REPEATING`, `PAUSED`, and `DROPPED` entries retain their progress and status, but can receive watch-date corrections. New entries and advancing `PLANNING`/`CURRENT` entries become `CURRENT`, or `COMPLETED` when the known AniList episode total is reached. Unknown episode totals never trigger automatic completion.
-- A mapped episode above AniList's known total skips the entire entry with a range/offset warning. Progress is not silently capped to hide a mapping mistake.
-- Start and finish dates come from Crunchyroll's stored `date_played` timestamps, converted to calendar dates in the computer's timezone (`TZ` can override it). Start uses the earliest dated watched episode, provided mapped episode 1 has a timestamp. Finish uses the latest timestamp only for `COMPLETED` entries with a known episode total and dated watched history for every episode. Duplicate language versions use the earliest available timestamp per mapped episode; split-season offsets and ranges apply before calculating dates.
+- Watched counts are capped at AniList's known episode total; unknown totals remain uncapped. Original episode numbers do not trigger overflow warnings for count mappings. Legacy range mappings retain their consecutive-progress and overflow checks until remapped; mixing legacy and count mappings for one AniList entry fails and requires remapping or removing the legacy mappings.
+- Start and finish dates come from Crunchyroll's stored `date_played` timestamps, converted to calendar dates in the computer's timezone (`TZ` can override it). For count mappings, start uses the earliest dated watched episode without requiring original episode 1. Episodes are ordered within each season and merged by counted position across seasons, using the earliest available timestamp per position. Finish uses the latest watched timestamp only for `COMPLETED` entries when the watched count reaches the known total and every counted position has a date. Legacy mappings still apply their ranges/offsets first, require a timestamp for mapped episode 1 to infer start, and require dated history for every episode to infer finish.
 - Watch dates replace existing AniList dates for all mapped anime, including entries already synced or manually added. Date-only updates preserve progress and status, and previews show the proposed dates. Missing/invalid timestamps and incomplete history do not produce guessed dates or clear existing dates. `REPEATING`, `PAUSED`, and `DROPPED` entries can receive start-date corrections but do not receive finish dates.
 - The archive retains the most recent timestamp per Crunchyroll content ID, not every viewing. Rewatches can therefore affect the inferred dates; original viewing dates cannot always be recovered. These are list start/finish dates, not AniList's activity timestamps.
 - Only list entry ID (when updating an existing entry), media ID, progress, status, and supported watch dates are sent to `SaveMediaListEntry`. The app does not send scores, notes, or repeat counts.
@@ -198,7 +178,7 @@ pnpm dev unmap CR_SEASON_ID --from 13    # Removes only that range.
 - Requests are paced, with timeouts and bounded retries for rate limits and transient read failures. AniList's rate-limit response headers are honored for normal cooldowns; unusually long cooldowns stop with an error.
 - Crunchyroll account/profile labels and the AniList viewer ID are bound to the database to catch accidental account changes. Run one sync process at a time and avoid editing the same AniList entries during a sync; AniList does not provide an atomic compare-and-update operation here.
 
-The app imports only the history Crunchyroll currently exposes. It cannot reconstruct removed/expired history or infer earlier episodes from a later episode. To bridge a known gap, correct your baseline progress on AniList manually, then rerun sync.
+The app imports only the history Crunchyroll currently exposes. It cannot reconstruct removed/expired history or infer earlier episodes from a later episode. Gaps do not block count-based syncing, but absent episodes do not contribute to the count. You can correct higher progress on AniList manually; sync preserves it rather than adding the local count to that baseline.
 
 ## Commands and configuration
 
@@ -211,8 +191,8 @@ The app imports only the history Crunchyroll currently exposes. It cannot recons
 | `history [--limit 20]` | Inspect recent local records |
 | `seasons` | Show local season IDs and saved mappings |
 | `search "title"` | Search AniList anime |
-| `map [season-id] [anilist-id]` | Search and choose matches interactively; omit both IDs for unmapped seasons, or supply both for direct mapping; supports `--from`, `--to`, `--offset` |
-| `unmap <season-id> [--from 1]` | Remove a mapping |
+| `map [season-id] [anilist-id]` | Save watched-count mappings; omit both IDs for unmapped seasons, one ID to review/remap, or supply both to save directly; replaces all mappings for the season |
+| `unmap <season-id> [--from <episode>]` | Remove all season mappings; optionally remove only a legacy mapping starting at the specified episode |
 | `auth-url [--client-id ID]` | Print the AniList authorization URL |
 | `sync [--pull] [--apply / --dry-run]` | Preview or apply watch progress |
 

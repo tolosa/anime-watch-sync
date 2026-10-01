@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { ListEntry } from "../src/anilist.ts";
 import { AniListClient } from "../src/anilist.ts";
@@ -61,6 +62,247 @@ test("mapping ranges support split cours, replacement, and reject overlap or inv
   assert.equal(store.mappings().length, 2);
   assert.equal(store.mappings()[0]?.mediaId, 44);
   assert.equal(store.removeMapping("SEASON", 13), 1);
+});
+
+test("existing SQLite mappings migrate additively and retain their legacy shape", () => {
+  const dir = mkdtempSync(join(tmpdir(), "anime-sync-migration-"));
+  const path = join(dir, "history.sqlite");
+  try {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec(`CREATE TABLE mappings (
+        season_id TEXT NOT NULL, media_id INTEGER NOT NULL CHECK(media_id > 0),
+        episode_from INTEGER NOT NULL CHECK(episode_from > 0), episode_to INTEGER,
+        episode_offset INTEGER NOT NULL,
+        PRIMARY KEY (season_id, episode_from),
+        CHECK(episode_to IS NULL OR episode_to >= episode_from),
+        CHECK(episode_from - episode_offset > 0)
+      ) STRICT;
+      INSERT INTO mappings VALUES ('SEASON', 42, 1, NULL, 0);`);
+    } finally {
+      db.close();
+    }
+    {
+      using store = new Store(path);
+      assert.deepEqual(store.mappings(), [mapping]);
+      assert.equal(store.db.prepare("SELECT mode FROM mappings").get()?.mode, "legacy");
+      assert.equal(
+        planProgress(
+          collectProgress([episode(1), episode(3)], store.mappings(), 0.9).groups[0]!,
+          media(),
+        ).progress,
+        1,
+      );
+      store.upsertHistory([episode()]);
+      store.bindSource("account", "profile");
+      store.setSeasonMapping("SEASON", 43);
+    }
+    using reopened = new Store(path);
+    assert.deepEqual(reopened.mappings(), [{ ...mapping, mediaId: 43, mode: "count" }]);
+    assert.equal(reopened.history().length, 1);
+    reopened.bindSource("account", "profile");
+    assert.throws(() => reopened.bindSource("other", "profile"), /different/);
+    reopened.setMapping(mapping);
+    assert.deepEqual(reopened.mappings(), [mapping]);
+    assert.equal(reopened.db.prepare("SELECT mode FROM mappings").get()?.mode, "legacy");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("season mappings validate and replace all legacy ranges transactionally", () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode(), episode(1, { id: "OTHER", seasonId: "OTHER" })]);
+  const ranges = [
+    { ...mapping, to: 12 },
+    { ...mapping, from: 13, to: 24, mediaId: 43, offset: 12 },
+  ];
+  for (const range of ranges) store.setMapping(range);
+  store.setMapping({ ...mapping, seasonId: "OTHER" });
+  const before = store.mappings();
+  for (const id of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => store.setSeasonMapping("SEASON", id), /Invalid mapping/);
+    assert.deepEqual(store.mappings(), before);
+  }
+  assert.throws(() => store.setSeasonMapping("UNKNOWN", 44), /Unknown season/);
+  assert.deepEqual(store.mappings(), before);
+  store.db.exec(`CREATE TRIGGER fail_count BEFORE INSERT ON mappings
+    WHEN NEW.mode = 'count' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
+  assert.throws(() => store.setSeasonMapping("SEASON", 44), /injected failure/);
+  assert.deepEqual(store.mappings(), before);
+  store.db.exec("DROP TRIGGER fail_count");
+  store.setSeasonMapping("SEASON", 44);
+  store.setSeasonMapping("SEASON", 45);
+  assert.deepEqual(store.mappings(), [
+    { ...mapping, seasonId: "OTHER" },
+    { ...mapping, mediaId: 45, mode: "count" },
+  ]);
+  assert.equal(store.removeMapping("SEASON"), 1);
+  assert.equal(store.removeMapping("SEASON"), 0);
+  for (const range of ranges) store.setMapping(range);
+  assert.equal(store.removeMapping("SEASON", 13), 1);
+  store.setMapping(ranges[1]!);
+  assert.equal(store.removeMapping("SEASON"), 2);
+  assert.deepEqual(store.mappings(), [{ ...mapping, seasonId: "OTHER" }]);
+});
+
+test("count mappings normalize gaps and high numbers per season and deduplicate dubs", () => {
+  const result = collectProgress(
+    [
+      episode(105),
+      episode(101),
+      episode(101, { id: "DUPLICATE" }),
+      episode(110, { fullyWatched: false, playhead: 1296 }),
+      episode(120, { fullyWatched: false, playhead: 1295 }),
+      episode(50, { id: "DUB50", seasonId: "DUB" }),
+      episode(90, { id: "DUB90", seasonId: "DUB" }),
+      episode(0),
+      episode(-1),
+      episode(1.5),
+      episode(1, { episodeNumber: null }),
+      episode(1, { seasonId: null }),
+      episode(1, { seasonId: "UNMAPPED" }),
+    ],
+    [
+      { ...mapping, mode: "count" },
+      { ...mapping, seasonId: "DUB", mode: "count" },
+    ],
+    0.9,
+  );
+  assert.equal(result.groups.length, 1);
+  const group = result.groups[0]!;
+  assert.equal(group.mode, "count");
+  assert.deepEqual([...group.episodes], [1, 2, 3]);
+  assert.equal(result.unmapped, 1);
+  assert.equal(result.unnumbered, 5);
+  assert.equal(planProgress(group, media()).progress, 3);
+  assert.equal(planProgress(group, media({ episodes: null })).progress, 3);
+  const partials = collectProgress(
+    [episode(100, { fullyWatched: false, playhead: 10 })],
+    [{ ...mapping, mode: "count" }],
+    0.9,
+  );
+  assert.deepEqual(partials.groups, []);
+});
+
+test("count progress caps to AniList totals, is not added to remote progress, and never decreases", () => {
+  const group = collectProgress(
+    [episode(101), episode(103), episode(105), episode(107)],
+    [{ ...mapping, mode: "count" }],
+    0.9,
+  ).groups[0]!;
+  const capped = planProgress(group, media({ episodes: 3 }));
+  assert.equal(capped.progress, 3);
+  assert.equal(capped.status, "COMPLETED");
+  assert.equal(capped.action, "update");
+  assert.doesNotMatch(capped.reason, /exceeds/);
+  assert.ok(capped.dates.completedAt);
+  for (const episodes of [3, 12, null]) {
+    for (const previous of [0, 2, 4, 8]) {
+      const plan = planProgress(
+        group,
+        media({
+          episodes,
+          mediaListEntry: { id: 9, progress: previous, status: "CURRENT" },
+        }),
+      );
+      assert.equal(plan.progress, Math.max(previous, Math.min(4, episodes ?? Infinity)));
+    }
+  }
+  for (const status of ["COMPLETED", "REPEATING", "PAUSED", "DROPPED"] as const) {
+    const plan = planProgress(
+      group,
+      media({
+        mediaListEntry: { id: 9, progress: 2, status },
+      }),
+    );
+    assert.equal(plan.progress, 2);
+    assert.equal(plan.status, status);
+  }
+});
+
+test("count dates use actual timestamp bounds across ordinals and duplicate viewings", () => {
+  const group = collectProgress(
+    [
+      episode(100, { watchedAt: "2024-06-10T12:00:00Z" }),
+      episode(300, { watchedAt: "2024-06-01T12:00:00Z" }),
+      episode(300, { id: "REWATCH", watchedAt: "2024-06-15T12:00:00Z" }),
+      episode(400, { watchedAt: "2024-06-05T12:00:00Z" }),
+      episode(1, { id: "DUB", seasonId: "DUB", watchedAt: "2024-06-20T12:00:00Z" }),
+      episode(500, { fullyWatched: false, playhead: 1, watchedAt: "2025-01-01T12:00:00Z" }),
+    ],
+    [
+      { ...mapping, mode: "count" },
+      { ...mapping, seasonId: "DUB", mode: "count" },
+    ],
+    0.9,
+  ).groups[0]!;
+  for (const episodes of [2, 3]) {
+    assert.deepEqual(planProgress(group, media({ episodes })).dates, {
+      startedAt: { year: 2024, month: 6, day: 1 },
+      completedAt: { year: 2024, month: 6, day: 20 },
+    });
+  }
+  assert.equal(planProgress(group, media({ episodes: null })).dates.completedAt, undefined);
+});
+
+test("count dates do not fabricate missing timestamps or infer completion from remote progress", () => {
+  const makeGroup = (items: ReturnType<typeof episode>[]) =>
+    collectProgress(items, [{ ...mapping, mode: "count" }], 0.9).groups[0]!;
+  for (const watchedAt of [null, "invalid"]) {
+    const missing = makeGroup([episode(100, { watchedAt }), episode(200, { watchedAt })]);
+    const plan = planProgress(missing, media({ episodes: 2 }));
+    assert.equal(plan.progress, 2);
+    assert.deepEqual(plan.dates, {});
+    for (const items of [
+      [episode(100, { watchedAt }), episode(200)],
+      [episode(100), episode(200, { watchedAt })],
+    ]) {
+      const dates = planProgress(makeGroup(items), media({ episodes: 2 })).dates;
+      assert.deepEqual(dates.startedAt, { year: 2026, month: 9, day: 29 });
+      assert.equal(dates.completedAt, undefined);
+    }
+  }
+  const completed = media({
+    episodes: 3,
+    mediaListEntry: { id: 9, progress: 3, status: "COMPLETED" },
+  });
+  assert.equal(planProgress(makeGroup([episode(100)]), completed).dates.completedAt, undefined);
+});
+
+test("mixed count and range mappings for one media fail rather than silently changing semantics", () => {
+  const items = [episode(1), episode(1, { seasonId: "DUB" })];
+  const mappings = [mapping, { ...mapping, seasonId: "DUB", mode: "count" as const }];
+  for (const history of [items, [...items].reverse()]) {
+    assert.throws(() => collectProgress(history, mappings, 0.9), /Cannot mix count and range/);
+  }
+});
+
+test("count sync previews, applies a capped count, and converges without adding a remote baseline", async () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode(101), episode(103), episode(105)]);
+  store.setSeasonMapping("SEASON", 42);
+  let remote: ListEntry = { id: 9, progress: 1, status: "CURRENT" };
+  let writes = 0;
+  const client: Pick<AniListClient, "viewer" | "media" | "save"> = {
+    viewer: async () => ({ id: 7, name: "tester" }),
+    media: async () => media({ episodes: 2, mediaListEntry: remote }),
+    save: async (_media, progress, status, dates) => {
+      writes++;
+      remote = { ...remote, progress, status, ...dates };
+      return remote;
+    },
+  };
+  const preview = await syncAniList(store, client, { dryRun: true, threshold: 0.9 });
+  assert.equal(preview.plans[0]?.progress, 2);
+  assert.equal(writes, 0);
+  await syncAniList(store, client, { dryRun: false, threshold: 0.9 });
+  const repeat = await syncAniList(store, client, { dryRun: false, threshold: 0.9 });
+  assert.equal(repeat.plans[0]?.action, "skip");
+  assert.equal(remote.progress, 2);
+  assert.equal(remote.status, "COMPLETED");
+  assert.equal(writes, 1);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM sync_log").get()?.n, 1);
 });
 
 test("deduplicates dubs, applies offsets, and skips partial/unmapped/fractional episodes", () => {

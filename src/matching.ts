@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AniListClient, Media } from "./anilist.ts";
-import type { HistoryItem } from "./crunchyroll.ts";
+import { type HistoryItem, isWatched } from "./crunchyroll.ts";
 import type { Mapping } from "./database.ts";
 import { clean } from "./terminal.ts";
 
@@ -10,6 +10,7 @@ export interface LocalSeason {
   crunchyrollUrl: string | null;
   queries: string[];
   episodes: number[];
+  watchedCount: number;
   mappings: Mapping[];
 }
 
@@ -60,7 +61,11 @@ function normalize(title: string): string {
     .trim();
 }
 
-export function localSeasons(history: HistoryItem[], mappings: Mapping[]): LocalSeason[] {
+export function localSeasons(
+  history: HistoryItem[],
+  mappings: Mapping[],
+  threshold = 0.9,
+): LocalSeason[] {
   return [
     ...Map.groupBy(
       history.filter((item) => item.seasonId),
@@ -89,6 +94,12 @@ export function localSeasons(history: HistoryItem[], mappings: Mapping[]): Local
               .filter((n): n is number => n !== null && Number.isSafeInteger(n) && n > 0),
           ),
         ].sort((a, b) => a - b),
+        watchedCount: new Set(
+          items
+            .filter((item) => isWatched(item, threshold))
+            .map((item) => item.episodeNumber)
+            .filter((n): n is number => n !== null && Number.isSafeInteger(n) && n > 0),
+        ).size,
         mappings: mappings.filter((mapping) => mapping.seasonId === id),
       };
     })

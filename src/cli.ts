@@ -7,7 +7,7 @@ import { crunchyrollSettings, loadEnvironment, requiredEnv, threshold, token } f
 import { CrunchyrollClient, isWatched } from "./crunchyroll.ts";
 import { renewSession, SessionFile, SessionManager } from "./crunchyroll-session.ts";
 import { Store } from "./database.ts";
-import { type MappingOptions, mapInteractively } from "./interactive-map.ts";
+import { mapInteractively } from "./interactive-map.ts";
 import { localSeasons } from "./matching.ts";
 import { formatWatchDates, syncAniList } from "./sync.ts";
 import { clean, TerminalPrompt } from "./terminal.ts";
@@ -172,7 +172,11 @@ program
       anilist:
         mappings
           .filter((m) => m.seasonId === id)
-          .map((m) => `${m.mediaId} [${m.from}–${m.to ?? "end"}, offset ${m.offset}]`)
+          .map((m) =>
+            m.mode === "count"
+              ? `${m.mediaId} [watched count]`
+              : `${m.mediaId} [legacy ${m.from}–${m.to ?? "end"}, offset ${m.offset}]`,
+          )
           .join("; ") || "unmapped",
     }));
     if (!rows.length) console.log("No local history. Run pull first.");
@@ -229,65 +233,54 @@ program
     "AniList anime ID (omit to search and choose interactively)",
     positiveInteger,
   )
-  .option("--from <episode>", "First Crunchyroll episode in this mapping", positiveInteger, 1)
-  .option("--to <episode>", "Last Crunchyroll episode (inclusive)", positiveInteger)
-  .option("--offset <number>", "AniList episode = Crunchyroll episode minus offset", integer, 0)
-  .action(
-    async (seasonId: string | undefined, mediaId: number | undefined, options: MappingOptions) => {
-      using store = openStore();
-      const seasons = localSeasons(store.history(), store.mappings());
-      if (seasonId && !seasons.some((season) => season.id === seasonId)) {
-        throw new Error(
-          "Unknown season ID. Run pull, then seasons, and copy a season ID from the results.",
+  .action(async (seasonId: string | undefined, mediaId: number | undefined) => {
+    using store = openStore();
+    const seasons = localSeasons(store.history(), store.mappings(), threshold());
+    if (seasonId && !seasons.some((season) => season.id === seasonId)) {
+      throw new Error(
+        "Unknown season ID. Run pull, then seasons, and copy a season ID from the results.",
+      );
+    }
+    if (mediaId === undefined) {
+      const pending = seasons.filter((season) =>
+        seasonId ? season.id === seasonId : !season.mappings.length,
+      );
+      if (!pending.length) {
+        console.log(
+          seasons.length
+            ? "All local seasons have mappings. Use map <season-id> to change a match or switch to watched-count syncing."
+            : "No local seasons. Run pull first.",
         );
-      }
-      if (mediaId === undefined) {
-        if (!seasonId && (options.from !== 1 || options.to !== undefined || options.offset !== 0)) {
-          throw new Error(
-            "Specify a season ID when using --from, --to, or --offset. You can also edit each range interactively.",
-          );
-        }
-        const pending = seasons.filter((season) =>
-          seasonId ? season.id === seasonId : !season.mappings.length,
-        );
-        if (!pending.length) {
-          console.log(
-            seasons.length
-              ? "All local seasons have mappings. Use map <season-id> to change a match or map another episode range."
-              : "No local seasons. Run pull first.",
-          );
-          return;
-        }
-        if (!process.stdin.isTTY || !process.stdout.isTTY) {
-          throw new Error(
-            "Interactive mapping requires a terminal. Use map <season-id> <anilist-id> for non-interactive mapping.",
-          );
-        }
-        const client = aniList();
-        using prompt = new TerminalPrompt();
-        await mapInteractively(store, pending, client, options, prompt);
         return;
       }
-      const media = await aniList().media(mediaId);
-      store.setMapping({
-        seasonId: seasonId!,
-        mediaId,
-        from: options.from,
-        to: options.to ?? null,
-        offset: options.offset,
-      });
-      console.log(
-        `Mapped ${clean(seasonId!)} [${options.from}–${options.to ?? "end"}] → ${clean(mediaTitle(media))} (${mediaId}), offset ${options.offset}.`,
-      );
-    },
-  );
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error(
+          "Interactive mapping requires a terminal. Use map <season-id> <anilist-id> for non-interactive mapping.",
+        );
+      }
+      const client = aniList();
+      using prompt = new TerminalPrompt();
+      await mapInteractively(store, pending, client, prompt);
+      return;
+    }
+    const media = await aniList().media(mediaId);
+    store.setSeasonMapping(seasonId!, mediaId);
+    const count = seasons.find((season) => season.id === seasonId)!.watchedCount;
+    console.log(
+      `Mapped ${clean(seasonId!)} → ${clean(mediaTitle(media))} (${mediaId}): ${count} watched Crunchyroll episode(s), ${Math.min(count, media.episodes ?? Infinity)} viewed episode(s) on AniList. Run sync to preview changes.`,
+    );
+  });
 
 program
   .command("unmap")
   .description("Remove a season mapping from SQLite")
   .argument("<season-id>")
-  .option("--from <episode>", "Mapping start to remove", positiveInteger, 1)
-  .action((seasonId: string, options: { from: number }) => {
+  .option(
+    "--from <episode>",
+    "Remove only a legacy mapping starting at this episode",
+    positiveInteger,
+  )
+  .action((seasonId: string, options: { from?: number }) => {
     using store = openStore();
     console.log(`Removed ${store.removeMapping(seasonId, options.from)} mapping(s).`);
   });
