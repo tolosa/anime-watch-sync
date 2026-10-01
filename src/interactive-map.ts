@@ -1,5 +1,5 @@
 import { type AniListClient, type Media, mediaTitle } from "./anilist.ts";
-import type { Store } from "./database.ts";
+import { buildSeasonMappings, type Mapping, type Store } from "./database.ts";
 import { type LocalSeason, matchingCandidates } from "./matching.ts";
 import type { MappingPrompt } from "./terminal.ts";
 
@@ -23,16 +23,48 @@ function showCandidates(prompt: MappingPrompt, candidates: Media[]): void {
 async function reviewMapping(
   store: Store,
   season: LocalSeason,
-  media: Media,
+  selected: Media[],
   prompt: MappingPrompt,
 ): Promise<Outcome | "back"> {
-  prompt.write(`Mapping: ${season.id} → ${mediaTitle(media)} (${media.id}).`);
-  const count = Math.min(season.watchedCount, media.episodes ?? Infinity);
+  let mappings: Mapping[];
+  try {
+    mappings = buildSeasonMappings(season.id, selected);
+  } catch (error) {
+    prompt.write(error instanceof Error ? error.message : "Invalid selection.");
+    return "back";
+  }
   prompt.write(
-    `${season.watchedCount} watched Crunchyroll episode(s) → ${count} viewed episode(s) on AniList.`,
+    `Mapping: ${season.id} → ${selected.map((media) => `${mediaTitle(media)} (${media.id})`).join(" → ")}.`,
   );
-  if (count < season.watchedCount)
-    prompt.write(`Count capped at AniList's ${media.episodes} episodes.`);
+
+  let allocated = 0;
+  for (const [index, media] of selected.entries()) {
+    const count = Math.min(
+      Math.max(0, season.watchedCount - mappings[index]!.offset),
+      media.episodes ?? Infinity,
+    );
+    allocated += count;
+    if (selected.length === 1) {
+      prompt.write(
+        `${season.watchedCount} watched Crunchyroll episode(s) → ${count} viewed episode(s) on AniList.`,
+      );
+      if (count < season.watchedCount)
+        prompt.write(`Count capped at AniList's ${media.episodes} episodes.`);
+    } else {
+      prompt.write(
+        `${index + 1}. ${mediaTitle(media)} (${media.id}): ${count} viewed episode(s) / ${media.episodes ?? "unknown"}.`,
+      );
+    }
+  }
+  if (selected.length > 1) {
+    prompt.write(
+      `${season.watchedCount} watched Crunchyroll episode(s), allocated in the selected order.`,
+    );
+    if (allocated < season.watchedCount)
+      prompt.write(
+        `${season.watchedCount - allocated} episode(s) exceed the selected entries' totals and will not increase progress.`,
+      );
+  }
   prompt.write("Sync preserves higher AniList progress and protected list statuses.");
   if (season.mappings.length)
     prompt.write(
@@ -49,8 +81,10 @@ async function reviewMapping(
       case "":
       case "y":
       case "yes":
-        store.setSeasonMapping(season.id, media.id);
-        prompt.write(`Saved ${season.id} → ${mediaTitle(media)} (${media.id}).`);
+        store.setSeasonMappings(season.id, selected);
+        prompt.write(
+          `Saved ${season.id} → ${selected.map((media) => `${mediaTitle(media)} (${media.id})`).join(" → ")}.`,
+        );
         return "saved";
       default:
         prompt.write("Choose one of the listed options.");
@@ -77,7 +111,7 @@ async function matchSeason(
   for (;;) {
     showCandidates(prompt, candidates);
     const answer = await prompt.read(
-      `${candidates.length ? `Choose 1–${candidates.length}, ` : ""}s search, i enter ID, Enter skip, q quit: `,
+      `${candidates.length ? `Choose 1–${candidates.length} (comma-separated for multiple, in watch order), ` : ""}s search, i enter ID, Enter skip, q quit: `,
     );
     if (answer === null || answer.toLowerCase() === "q") return "quit";
     if (!answer || answer.toLowerCase() === "k") return "skipped";
@@ -90,26 +124,33 @@ async function matchSeason(
       }
       continue;
     }
-    let id: number | undefined;
+    let ids: number[] = [];
     if (answer.toLowerCase() === "i") {
       const input = await prompt.read("AniList anime ID (Enter goes back): ");
       if (input === null) return "quit";
       if (!input) continue;
       if (/^\d+$/.test(input) && Number(input) > 0 && Number(input) <= 2_147_483_647)
-        id = Number(input);
+        ids = [Number(input)];
       else {
         prompt.write("Enter a positive AniList anime ID.");
         continue;
       }
-    } else if (/^\d+$/.test(answer)) {
-      id = candidates[Number(answer) - 1]?.id;
+    } else if (/^\d+(?:\s*,\s*\d+)*$/.test(answer.trim())) {
+      const choices = answer.split(",").map((value) => candidates[Number(value.trim()) - 1]);
+      if (choices.every((choice) => choice !== undefined))
+        ids = choices.map((choice) => choice!.id);
     }
-    if (id === undefined) {
-      prompt.write("Choose a listed number or action.");
+    if (!ids.length) {
+      prompt.write("Choose listed numbers separated by commas, or an action.");
       continue;
     }
-    const media = await client.media(id);
-    const result = await reviewMapping(store, season, media, prompt);
+    if (new Set(ids).size !== ids.length) {
+      prompt.write("Choose each match only once.");
+      continue;
+    }
+    const selected: Media[] = [];
+    for (const id of ids) selected.push(await client.media(id));
+    const result = await reviewMapping(store, season, selected, prompt);
     if (result !== "back") return result;
   }
 }
@@ -123,7 +164,7 @@ export async function mapInteractively(
   let saved = 0;
   let skipped = 0;
   prompt.write(
-    `Matching ${seasons.length} season(s). Select a match and review its watched episode count before saving. Saved mappings are kept if you quit.`,
+    `Matching ${seasons.length} season(s). Select one or more matches in watch order and review the watched episode allocation before saving. Saved mappings are kept if you quit.`,
   );
   for (const [index, season] of seasons.entries()) {
     prompt.write(`[${index + 1}/${seasons.length}]`);

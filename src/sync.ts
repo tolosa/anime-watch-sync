@@ -8,13 +8,40 @@ export interface ProgressGroup {
   mediaId: number;
   episodes: Set<number>;
   watchedAt?: Map<number, number>;
-  mode?: "count";
+
   latestWatchedAt?: number;
 }
 
 export function collectProgress(history: HistoryItem[], mappings: Mapping[], threshold: number) {
   const groups = new Map<number, ProgressGroup>();
-  const countSeasons = new Map<string, ProgressGroup>();
+
+  const countMappings = new Map<string, Mapping[]>();
+  for (const mapping of mappings) {
+    if (mapping.mode !== "count") continue;
+    const season = countMappings.get(mapping.seasonId) ?? [];
+    season.push(mapping);
+    countMappings.set(mapping.seasonId, season);
+  }
+  const countSeasons = new Map<string, Map<number, { earliest: number; latest: number }>>();
+  const addEpisode = (mapping: Mapping, episode: number, earliest: number, latest: number) => {
+    const group: ProgressGroup = groups.get(mapping.mediaId) ?? {
+      mediaId: mapping.mediaId,
+      episodes: new Set<number>(),
+      watchedAt: new Map<number, number>(),
+    };
+    groups.set(mapping.mediaId, group);
+    // Count offsets allocate watched ordinals; only legacy offsets translate
+    // episode numbers. Keep source identities so separate arcs don't collapse.
+    const mappedEpisode = mapping.mode === "count" ? episode : episode - mapping.offset;
+    group.episodes.add(mappedEpisode);
+    if (Number.isFinite(earliest)) {
+      const dates = group.watchedAt!;
+      dates.set(mappedEpisode, Math.min(dates.get(mappedEpisode) ?? Infinity, earliest));
+    }
+    if (Number.isFinite(latest)) {
+      group.latestWatchedAt = Math.max(group.latestWatchedAt ?? -Infinity, latest);
+    }
+  };
   let unmapped = 0;
   let unnumbered = 0;
   for (const item of history) {
@@ -29,63 +56,47 @@ export function collectProgress(history: HistoryItem[], mappings: Mapping[], thr
       continue;
     }
     const episodeNumber = item.episodeNumber;
+    const timestamp = item.watchedAt === null ? NaN : Date.parse(item.watchedAt);
+    const hasCountMappings = countMappings.has(item.seasonId);
+    if (hasCountMappings) {
+      const season =
+        countSeasons.get(item.seasonId) ?? new Map<number, { earliest: number; latest: number }>();
+      const dates = season.get(episodeNumber) ?? { earliest: Infinity, latest: -Infinity };
+      if (Number.isFinite(timestamp)) {
+        dates.earliest = Math.min(dates.earliest, timestamp);
+        dates.latest = Math.max(dates.latest, timestamp);
+      }
+      season.set(episodeNumber, dates);
+      countSeasons.set(item.seasonId, season);
+    }
     const mapping = mappings.find(
       (m) =>
+        m.mode !== "count" &&
         m.seasonId === item.seasonId &&
         episodeNumber >= m.from &&
         episodeNumber <= (m.to ?? Infinity),
     );
-    if (!mapping) {
-      unmapped++;
-      continue;
-    }
-    const group: ProgressGroup = groups.get(mapping.mediaId) ?? {
-      mediaId: mapping.mediaId,
-      episodes: new Set<number>(),
-      watchedAt: new Map<number, number>(),
-    };
-    if (groups.has(mapping.mediaId) && group.mode !== mapping.mode) {
-      throw new Error(`Cannot mix count and range mappings for AniList media ${mapping.mediaId}.`);
-    }
-    if (mapping.mode === "count") group.mode = "count";
-    groups.set(mapping.mediaId, group);
-    const source =
-      mapping.mode === "count"
-        ? (countSeasons.get(item.seasonId) ?? {
-            mediaId: mapping.mediaId,
-            episodes: new Set<number>(),
-            watchedAt: new Map<number, number>(),
-          })
-        : group;
-    if (mapping.mode === "count") countSeasons.set(item.seasonId, source);
-    const mappedEpisode = episodeNumber - mapping.offset;
-    source.episodes.add(mappedEpisode);
-    const timestamp = item.watchedAt === null ? NaN : Date.parse(item.watchedAt);
-    if (Number.isFinite(timestamp)) {
-      // Multiple language versions can represent the same episode. Keep the earliest viewing.
-      const dates = source.watchedAt!;
-      dates.set(mappedEpisode, Math.min(dates.get(mappedEpisode) ?? Infinity, timestamp));
-      if (mapping.mode === "count") {
-        group.latestWatchedAt = Math.max(group.latestWatchedAt ?? -Infinity, timestamp);
-      }
-    }
+    if (mapping) addEpisode(mapping, episodeNumber, timestamp, timestamp);
+    else if (!hasCountMappings) unmapped++;
   }
-  for (const season of countSeasons.values()) {
-    const group = groups.get(season.mediaId)!;
-    // Normalize within each season before merging: dubs contribute the same ordinals,
-    // even when their original episode numbers differ or contain gaps.
-    [...season.episodes]
+  for (const [seasonId, season] of countSeasons) {
+    // Ordinals select the target, but original episode numbers identify duplicates.
+    [...season.keys()]
       .sort((a, b) => a - b)
       .forEach((episode, index) => {
         const ordinal = index + 1;
-        group.episodes.add(ordinal);
-        const timestamp = season.watchedAt!.get(episode);
-        if (timestamp !== undefined) {
-          const dates = group.watchedAt!;
-          dates.set(ordinal, Math.min(dates.get(ordinal) ?? Infinity, timestamp));
+        const mapping = countMappings
+          .get(seasonId)!
+          .find((m) => ordinal >= m.from && ordinal <= (m.to ?? Infinity));
+        if (!mapping) {
+          unmapped++;
+          return;
         }
+        const dates = season.get(episode)!;
+        addEpisode(mapping, episode, dates.earliest, dates.latest);
       });
   }
+
   return { groups: [...groups.values()], unmapped, unnumbered };
 }
 
@@ -113,35 +124,16 @@ function planEpisodes(group: ProgressGroup, media: Media): SyncPlan {
     reason: "Already up to date",
     dates: {},
   };
-  if (
-    group.mode !== "count" &&
-    media.episodes !== null &&
-    [...group.episodes].some((n) => n > media.episodes!)
-  ) {
-    return {
-      ...plan,
-      reason: "Mapped episode exceeds AniList episode count; check the range/offset",
-    };
-  }
+
   if (current && ["COMPLETED", "REPEATING", "PAUSED", "DROPPED"].includes(current.status)) {
     return { ...plan, reason: `Preserving ${current.status.toLowerCase()} entry` };
   }
-  if (group.mode === "count") {
-    plan.progress = Math.max(previous, Math.min(group.episodes.size, media.episodes ?? Infinity));
-  } else {
-    // Advance only through consecutive watched episodes after current remote progress.
-    // A high episode in an incomplete history must not mark the whole series watched.
-    while (group.episodes.has(plan.progress + 1)) plan.progress++;
-  }
-  if (plan.progress === previous) {
-    if (group.mode !== "count" && [...group.episodes].some((n) => n > previous))
-      plan.reason = `Missing watched episode ${previous + 1}; progress held`;
-    return plan;
-  }
+  plan.progress = Math.max(previous, Math.min(group.episodes.size, media.episodes ?? Infinity));
+  if (plan.progress === previous) return plan;
   plan.status =
     media.episodes !== null && plan.progress === media.episodes ? "COMPLETED" : "CURRENT";
   plan.action = "update";
-  plan.reason = group.mode === "count" ? "Watched episode count" : "Consecutive watched episodes";
+  plan.reason = "Watched episode count";
   return plan;
 }
 
@@ -164,14 +156,8 @@ export function formatWatchDates(dates: WatchDates): string {
 
 export function planProgress(group: ProgressGroup, media: Media): SyncPlan {
   const plan = planEpisodes(group, media);
-  if (
-    group.mode !== "count" &&
-    media.episodes !== null &&
-    [...group.episodes].some((n) => n > media.episodes!)
-  )
-    return plan;
   const dates = group.watchedAt;
-  if (!dates?.size || (group.mode !== "count" && !dates.has(1))) return plan;
+  if (!dates?.size) return plan;
 
   const startedAt = watchDate(Math.min(...dates.values()));
   if (!sameDate(media.mediaListEntry?.startedAt, startedAt)) plan.dates.startedAt = startedAt;
@@ -179,15 +165,9 @@ export function planProgress(group: ProgressGroup, media: Media): SyncPlan {
   // A last-episode timestamp alone is insufficient: earlier episodes may have been
   // watched later, or may be absent from Crunchyroll's exposed history entirely.
   const completeDates =
-    group.mode === "count"
-      ? dates.size === group.episodes.size && group.episodes.size >= (media.episodes ?? Infinity)
-      : dates.size === media.episodes;
+    dates.size === group.episodes.size && group.episodes.size >= (media.episodes ?? Infinity);
   if (plan.status === "COMPLETED" && media.episodes !== null && completeDates) {
-    const completedAt = watchDate(
-      group.mode === "count"
-        ? (group.latestWatchedAt ?? Math.max(...dates.values()))
-        : Math.max(...dates.values()),
-    );
+    const completedAt = watchDate(group.latestWatchedAt ?? Math.max(...dates.values()));
     if (!sameDate(media.mediaListEntry?.completedAt, completedAt))
       plan.dates.completedAt = completedAt;
   }

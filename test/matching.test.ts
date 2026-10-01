@@ -5,6 +5,7 @@ import type { Media } from "../src/anilist.ts";
 import { Store } from "../src/database.ts";
 import { mapInteractively } from "../src/interactive-map.ts";
 import { localSeasons, matchingCandidates } from "../src/matching.ts";
+import { collectProgress, planProgress, syncAniList } from "../src/sync.ts";
 import { type MappingPrompt, TerminalPrompt } from "../src/terminal.ts";
 import { episode, mapping, media } from "./helpers.ts";
 
@@ -154,6 +155,302 @@ test("interactive selection validates the chosen media and saves only after revi
   assert.match(output.join("\n"), /TV \| 12 episodes \| ID 42/);
   assert.match(output.join("\n"), /https:\/\/anilist.co\/anime\/42/);
   assert.match(output.join("\n"), /1 mapping\(s\) saved/);
+});
+
+test("comma selections preserve reverse order, whitespace, review allocation, and whole-season replacement", async (t) => {
+  for (const [answer, watched] of [
+    ["2,1", 18],
+    ["  2 , 1  ", 18],
+    ["2,1", 30],
+  ] as const) {
+    await t.test(`${JSON.stringify(answer)} with ${watched} watched`, async (t) => {
+      using store = new Store(":memory:");
+      store.upsertHistory([
+        ...Array.from({ length: watched }, (_, index) => episode(101 + index * 2)),
+        episode(1, { id: "OTHER", seasonId: "OTHER" }),
+      ]);
+      const other = { ...mapping, seasonId: "OTHER", mediaId: 99 };
+      store.setMapping(other);
+      store.setMapping({ ...mapping, mediaId: 10, to: 12 });
+      store.setMapping({ ...mapping, mediaId: 11, from: 13, to: 24, offset: 12 });
+      store.setMapping({ ...mapping, mediaId: 12, from: 25, offset: 24 });
+      const before = store.mappings();
+      const candidates = [media(), media({ id: 43 })];
+      const client = clientFor(candidates);
+      const save = t.mock.method(store, "setSeasonMappings");
+      const secondCount = Math.min(watched - 12, 12);
+      const { prompt, output } = scriptedPrompt([answer, "y"], (question) => {
+        assert.deepEqual(store.mappings(), before);
+        assert.equal(save.mock.callCount(), 0);
+        if (question.startsWith("Save mapping?")) {
+          assert.deepEqual(client.reads, [43, 42]);
+          assert.ok(output.includes("1. Test Anime (43): 12 viewed episode(s) / 12."));
+          assert.ok(output.includes(`2. Test Anime (42): ${secondCount} viewed episode(s) / 12.`));
+        }
+      });
+      await mapInteractively(
+        store,
+        localSeasons(store.history(), before).filter((season) => season.id === "SEASON"),
+        client,
+        prompt,
+      );
+      assert.equal(save.mock.callCount(), 1);
+      assert.deepEqual(save.mock.calls[0]!.arguments, ["SEASON", [candidates[1], candidates[0]]]);
+      assert.deepEqual(store.mappings(), [
+        other,
+        { ...countMapping, mediaId: 43, to: 12 },
+        { ...countMapping, from: 13, offset: 12 },
+      ]);
+      assert.equal(output.filter((line) => line.startsWith("Save mapping?")).length, 1);
+      assert.ok(
+        output.includes(
+          "Choose 1–2 (comma-separated for multiple, in watch order), s search, i enter ID, Enter skip, q quit: ",
+        ),
+      );
+      assert.ok(output.includes("Mapping: SEASON → Test Anime (43) → Test Anime (42)."));
+      assert.ok(output.includes("Saved SEASON → Test Anime (43) → Test Anime (42)."));
+      assert.ok(
+        output.includes(
+          `${watched} watched Crunchyroll episode(s), allocated in the selected order.`,
+        ),
+      );
+      if (watched > 24) {
+        assert.ok(
+          output.includes(
+            "6 episode(s) exceed the selected entries' totals and will not increase progress.",
+          ),
+        );
+      } else {
+        assert.doesNotMatch(output.join("\n"), /exceed the selected entries/);
+      }
+      assert.match(output.join("\n"), /Saving replaces the existing mapping\(s\) for this season/);
+      assert.match(output.join("\n"), /1 mapping\(s\) saved/);
+
+      const { groups } = collectProgress(store.history(), store.mappings(), 0.9);
+      assert.deepEqual(
+        groups
+          .filter((group) => group.mediaId !== 99)
+          .map((group) => {
+            const plan = planProgress(
+              group,
+              candidates.find((candidate) => candidate.id === group.mediaId)!,
+            );
+            return [plan.mediaId, plan.progress];
+          }),
+        [
+          [43, 12],
+          [42, secondCount],
+        ],
+      );
+    });
+  }
+});
+
+test("more than two selections preview zero later counts without creating empty remote entries", async () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode(101), episode(103)]);
+  const candidates = [media(), media({ id: 43 }), media({ id: 44 })];
+  const client = clientFor(candidates);
+  const { prompt, output } = scriptedPrompt(["3,1,2", "y"]);
+  await mapInteractively(store, localSeasons(store.history(), []), client, prompt);
+  assert.deepEqual(client.reads, [44, 42, 43]);
+  assert.deepEqual(store.mappings(), [
+    { ...countMapping, mediaId: 44, to: 12 },
+    { ...countMapping, from: 13, to: 24, offset: 12 },
+    { ...countMapping, mediaId: 43, from: 25, offset: 24 },
+  ]);
+  assert.ok(output.includes("1. Test Anime (44): 2 viewed episode(s) / 12."));
+  assert.ok(output.includes("2. Test Anime (42): 0 viewed episode(s) / 12."));
+  assert.ok(output.includes("3. Test Anime (43): 0 viewed episode(s) / 12."));
+  assert.equal(output.filter((line) => line.startsWith("Save mapping?")).length, 1);
+
+  client.reads.length = 0;
+  const writes: [number, number][] = [];
+  const result = await syncAniList(
+    store,
+    {
+      ...client,
+      viewer: async () => ({ id: 1, name: "Test viewer" }),
+      save: async (selected, progress, status) => {
+        writes.push([selected.id, progress]);
+        return { id: selected.id, progress, status };
+      },
+    },
+    { dryRun: false, threshold: 0.9 },
+  );
+  assert.deepEqual(client.reads, [44]);
+  assert.deepEqual(writes, [[44, 2]]);
+  assert.deepEqual(
+    result.plans.map((plan) => [plan.mediaId, plan.progress]),
+    [[44, 2]],
+  );
+
+  const saved = store.mappings();
+  store.upsertHistory(Array.from({ length: 38 }, (_, index) => episode(101 + index * 2)));
+  const { groups } = collectProgress(store.history(), store.mappings(), 0.9);
+  assert.deepEqual(
+    groups.map((group) => [group.mediaId, group.episodes.size]),
+    [
+      [44, 12],
+      [42, 12],
+      [43, 14],
+    ],
+  );
+  // Live totals cap progress but do not move the boundaries saved during mapping.
+  assert.deepEqual(
+    groups.map((group) => {
+      const plan = planProgress(
+        group,
+        media({ id: group.mediaId, episodes: group.mediaId === 44 ? 10 : 13 }),
+      );
+      return [plan.mediaId, plan.progress];
+    }),
+    [
+      [44, 10],
+      [42, 12],
+      [43, 13],
+    ],
+  );
+  assert.deepEqual(store.mappings(), saved);
+});
+
+test("malformed, out-of-bounds, and duplicate lists reject the whole selection before any media reads or writes", async (t) => {
+  for (const answer of [
+    "1,",
+    ",1",
+    "1,,2",
+    "1, ,2",
+    "1 2",
+    "1;2",
+    "1,2x",
+    "1,1.5",
+    "1,-2",
+    "1,0",
+    "0,1",
+    "1,3",
+    "3,1",
+    "1,2,99",
+    "42,43",
+    "1,1",
+    "2,1,2",
+    "1,01",
+  ]) {
+    await t.test(answer, async (t) => {
+      using store = new Store(":memory:");
+      store.upsertHistory([episode()]);
+      store.setSeasonMappings("SEASON", [media({ id: 10 }), media({ id: 11 })]);
+      const before = store.mappings();
+      const changes = store.db.prepare("SELECT total_changes() AS count").get();
+      const save = t.mock.method(store, "setSeasonMappings");
+      const client = clientFor([media(), media({ id: 43 })]);
+      const { prompt, output } = scriptedPrompt([answer, "q"], () => {
+        assert.deepEqual(client.reads, []);
+        assert.deepEqual(store.mappings(), before);
+      });
+      await mapInteractively(store, localSeasons(store.history(), before), client, prompt);
+      assert.deepEqual(client.reads, []);
+      assert.equal(save.mock.callCount(), 0);
+      assert.deepEqual(store.mappings(), before);
+      assert.deepEqual(store.db.prepare("SELECT total_changes() AS count").get(), changes);
+      assert.ok(
+        output.includes(
+          ["1,1", "2,1,2", "1,01"].includes(answer)
+            ? "Choose each match only once."
+            : "Choose listed numbers separated by commas, or an action.",
+        ),
+      );
+      assert.doesNotMatch(output.join("\n"), /Save mapping\?|Mapping: SEASON|Saved SEASON/);
+    });
+  }
+});
+
+test("an unknown first total rejects after all media reads; reselecting it last succeeds", async (t) => {
+  using store = new Store(":memory:");
+  store.upsertHistory(Array.from({ length: 30 }, (_, index) => episode(101 + index * 2)));
+  store.setMapping(mapping);
+  const before = store.mappings();
+  const save = t.mock.method(store, "setSeasonMappings");
+  const client = clientFor([media(), media({ id: 43 })]);
+  const readMedia = client.media;
+  client.media = async (id) => ({ ...(await readMedia(id)), episodes: id === 42 ? null : 12 });
+  let choices = 0;
+  const { prompt, output } = scriptedPrompt(["1,2", "2,1", "y"], (question) => {
+    assert.deepEqual(store.mappings(), before);
+    assert.equal(save.mock.callCount(), 0);
+    if (question.startsWith("Choose") && ++choices === 2) {
+      assert.deepEqual(client.reads, [42, 43]);
+      assert.ok(
+        output.includes(
+          "Invalid mapping: episode totals must be positive safe integers; only the last entry may have an unknown total.",
+        ),
+      );
+      assert.doesNotMatch(output.join("\n"), /Save mapping\?|Mapping: SEASON/);
+    }
+    if (question.startsWith("Save mapping?")) {
+      assert.deepEqual(client.reads, [42, 43, 43, 42]);
+      assert.ok(output.includes("1. Test Anime (43): 12 viewed episode(s) / 12."));
+      assert.ok(output.includes("2. Test Anime (42): 18 viewed episode(s) / unknown."));
+    }
+  });
+  await mapInteractively(store, localSeasons(store.history(), before), client, prompt);
+  assert.equal(save.mock.callCount(), 1);
+  assert.deepEqual(store.mappings(), [
+    { ...countMapping, mediaId: 43, to: 12 },
+    { ...countMapping, from: 13, offset: 12 },
+  ]);
+  assert.equal(output.filter((line) => line.startsWith("Save mapping?")).length, 1);
+  assert.doesNotMatch(output.join("\n"), /exceed the selected entries/);
+});
+
+test("cancelling a multi-match review preserves every prior mapping", async () => {
+  for (const answers of [
+    ["2,1", "n", ""],
+    ["2,1", "k"],
+    ["2,1", "q"],
+    ["2,1", null],
+  ]) {
+    using store = new Store(":memory:");
+    store.upsertHistory([episode()]);
+    store.setSeasonMappings("SEASON", [media({ id: 10 }), media({ id: 11 }), media({ id: 12 })]);
+    const before = store.mappings();
+    const changes = store.db.prepare("SELECT total_changes() AS count").get();
+    const client = clientFor([media(), media({ id: 43 })]);
+    const { prompt, output } = scriptedPrompt(answers, () =>
+      assert.deepEqual(store.mappings(), before),
+    );
+    await mapInteractively(store, localSeasons(store.history(), before), client, prompt);
+    assert.deepEqual(client.reads, [43, 42]);
+    assert.deepEqual(store.mappings(), before);
+    assert.deepEqual(store.db.prepare("SELECT total_changes() AS count").get(), changes);
+    assert.match(output.join("\n"), /0 mapping\(s\) saved/);
+    assert.doesNotMatch(output.join("\n"), /Saved SEASON/);
+  }
+});
+
+test("a later selected media fetch failure never previews or partially saves the selection", async () => {
+  using store = new Store(":memory:");
+  store.upsertHistory([episode()]);
+  store.setMapping({ ...mapping, mediaId: 10, to: 12 });
+  store.setMapping({ ...mapping, mediaId: 11, from: 13, offset: 12 });
+  const before = store.mappings();
+  const changes = store.db.prepare("SELECT total_changes() AS count").get();
+  const client = clientFor([media(), media({ id: 43 }), media({ id: 44 })]);
+  const readMedia = client.media;
+  client.media = async (id) => {
+    const result = await readMedia(id);
+    assert.deepEqual(store.mappings(), before);
+    if (id === 42) throw new Error("Selected media unavailable");
+    return result;
+  };
+  const { prompt, output } = scriptedPrompt(["3,2,1"]);
+  await assert.rejects(
+    mapInteractively(store, localSeasons(store.history(), before), client, prompt),
+    /Selected media unavailable/,
+  );
+  assert.deepEqual(client.reads, [44, 43, 42]);
+  assert.deepEqual(store.mappings(), before);
+  assert.deepEqual(store.db.prepare("SELECT total_changes() AS count").get(), changes);
+  assert.doesNotMatch(output.join("\n"), /Save mapping\?|Mapping: SEASON|Saved SEASON/);
 });
 
 test("empty searches allow custom search and explicit ID entry", async () => {

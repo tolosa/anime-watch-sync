@@ -12,6 +12,42 @@ export interface Mapping {
   mode?: "count";
 }
 
+export function buildSeasonMappings(
+  seasonId: string,
+  targets: { id: number; episodes: number | null }[],
+): Mapping[] {
+  if (!seasonId || targets.length === 0)
+    throw new Error("Invalid mapping: select at least one AniList entry for a season.");
+  const ids = new Set<number>();
+  let offset = 0;
+  return targets.map(({ id, episodes }, index) => {
+    const last = index === targets.length - 1;
+    if (!Number.isSafeInteger(id) || id < 1 || ids.has(id))
+      throw new Error("Invalid mapping: AniList IDs must be unique positive safe integers.");
+    if (episodes === null ? !last : !Number.isSafeInteger(episodes) || episodes < 1)
+      throw new Error(
+        "Invalid mapping: episode totals must be positive safe integers; only the last entry may have an unknown total.",
+      );
+    const from = offset + 1;
+    const end = episodes === null ? offset : offset + episodes;
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(end))
+      throw new Error("Invalid mapping: accumulated episode ranges exceed safe integers.");
+    ids.add(id);
+    // Count boundaries are watched ordinals, not source episode numbers. The last
+    // slice stays open so future imports use the live AniList total as their cap.
+    const mapping: Mapping = {
+      seasonId,
+      mediaId: id,
+      from,
+      to: last ? null : end,
+      offset,
+      mode: "count",
+    };
+    offset = end;
+    return mapping;
+  });
+}
+
 export class Store implements Disposable {
   readonly db: DatabaseSync;
 
@@ -158,7 +194,7 @@ export class Store implements Disposable {
     if (
       !seasonId ||
       (mapping.mode !== undefined && mapping.mode !== "count") ||
-      (mapping.mode === "count" && (from !== 1 || to !== null || offset !== 0)) ||
+      (mapping.mode === "count" && offset !== from - 1) ||
       ![mediaId, from, offset].every(Number.isSafeInteger) ||
       mediaId < 1 ||
       from < 1 ||
@@ -201,10 +237,15 @@ export class Store implements Disposable {
   }
 
   setSeasonMapping(seasonId: string, mediaId: number): void {
+    this.setSeasonMappings(seasonId, [{ id: mediaId, episodes: null }]);
+  }
+
+  setSeasonMappings(seasonId: string, targets: { id: number; episodes: number | null }[]): void {
+    const mappings = buildSeasonMappings(seasonId, targets);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.removeMapping(seasonId);
-      this.setMapping({ seasonId, mediaId, from: 1, to: null, offset: 0, mode: "count" });
+      for (const mapping of mappings) this.setMapping(mapping);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

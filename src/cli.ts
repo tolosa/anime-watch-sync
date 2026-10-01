@@ -174,7 +174,7 @@ program
           .filter((m) => m.seasonId === id)
           .map((m) =>
             m.mode === "count"
-              ? `${m.mediaId} [watched count]`
+              ? `${m.mediaId} [watched count ${m.from}–${m.to ?? "remaining"}]`
               : `${m.mediaId} [legacy ${m.from}–${m.to ?? "end"}, offset ${m.offset}]`,
           )
           .join("; ") || "unmapped",
